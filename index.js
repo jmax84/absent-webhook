@@ -11,11 +11,17 @@ app.use(express.json());
 
 // Health check
 app.get("/", (_req, res) => {
+  console.log("Health check hit");
   res.status(200).send("J.A.R.V.I.S. online.");
 });
 
 app.post("/sms", async (req, res) => {
   try {
+    console.log("====================================");
+    console.log("Incoming SMS webhook hit");
+    console.log("Body:", req.body);
+    console.log("====================================");
+
     const from = req.body.From || "";
     const body = (req.body.Body || "").trim();
     const city = req.body.FromCity || "";
@@ -23,14 +29,26 @@ app.post("/sms", async (req, res) => {
 
     // Optional: notify Teams that someone texted JARVIS
     const teamsWebhook = process.env.TEAMS_WEBHOOK_URL;
+
     if (teamsWebhook) {
-      await fetch(teamsWebhook, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: `🤖 *J.A.R.V.I.S. SMS*\n**From:** ${from} (${city}, ${state})\n**Message:** ${body}`
-        })
-      });
+      try {
+        await fetch(teamsWebhook, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text:
+              `🤖 *J.A.R.V.I.S. SMS*\n` +
+              `**From:** ${from} (${city}, ${state})\n` +
+              `**Message:** ${body}`
+          })
+        });
+
+        console.log("Posted incoming SMS to Teams");
+      } catch (teamsError) {
+        console.error("Teams webhook failed:", teamsError);
+      }
+    } else {
+      console.log("No TEAMS_WEBHOOK_URL set. Skipping Teams notification.");
     }
 
     let reply = "";
@@ -90,13 +108,21 @@ app.post("/sms", async (req, res) => {
         "I am in test mode right now. Try HELP, INK, PARTS, HVAC, ORDERS, or JONATHAN.";
     }
 
+    console.log("Replying with:", reply);
+
     const twiml = new Twiml.MessagingResponse();
     twiml.message(reply);
 
     res.type("text/xml").send(twiml.toString());
   } catch (e) {
-    console.error(e);
-    res.status(200).send("<Response></Response>");
+    console.error("JARVIS SMS handler error:", e);
+
+    const twiml = new Twiml.MessagingResponse();
+    twiml.message(
+      "J.A.R.V.I.S. had an internal error while processing that message. Jonathan needs to check the logs."
+    );
+
+    res.type("text/xml").send(twiml.toString());
   }
 });
 
