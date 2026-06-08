@@ -263,73 +263,56 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
 
   if (msg === "" || msg === "help") {
     return (
-      "J.A.R.V.I.S. online.\n\n" +
-      "Jonathan's Automated Resource & Virtual Information System.\n\n" +
-      "I can currently help with:\n" +
-      "- Parts request intake\n" +
-      "- Ink question routing\n" +
-      "- HVAC / AC question routing\n" +
-      "- Map request routing\n" +
-      "- Open order question routing\n" +
-      "- Escalation to Jonathan when needed\n\n" +
-      "Try asking:\n" +
-      "\"Need part 12345 bearing\"\n" +
-      "\"What should I send for an HVAC issue?\"\n" +
-      "\"Where are the map options?\""
-    );
-  }
-
-  if (msg === "parts") {
-    return (
-      "PARTS MODE\n\n" +
-      "For parts questions, include:\n" +
-      "- Machine number or area\n" +
-      "- Part number if known\n" +
-      "- Description or photo if part number is unknown\n" +
-      "- Quantity needed\n" +
-      "- Whether the machine is down\n\n" +
-      "If the part is not available, JARVIS can add it to Jonathan's next Purchase Order Request list.\n\n" +
-      "For a request demo, type:\n" +
-      "Need part 12345 bearing"
+      "I can help with parts requests, ink questions, HVAC / AC routing, maps, open order questions, and escalation to Jonathan when needed.\n\n" +
+      "I do not have the full knowledge base loaded yet, so if I do not know something, I should not guess."
     );
   }
 
   if (
-    msg.startsWith("request part") ||
-    msg.startsWith("add part") ||
+    msg === "parts" ||
+    msg.includes("part ") ||
+    msg.includes("parts ") ||
+    msg.startsWith("i need part") ||
     msg.startsWith("need part")
   ) {
-    const info = extractSimplePartInfo(cleanBody);
+    if (
+      msg.startsWith("request part") ||
+      msg.startsWith("add part") ||
+      msg.startsWith("need part") ||
+      msg.startsWith("i need part")
+    ) {
+      const info = extractSimplePartInfo(cleanBody.replace(/^i need part/i, "need part"));
 
-    pendingRequests.set(from, {
-      step: "awaiting_due_date",
-      requesterName,
-      requesterPhone: from,
-      partNumber: info.partNumber,
-      partDescription: info.partDescription,
-      quantityRequested: "",
-      notes: cleanBody
-    });
+      pendingRequests.set(from, {
+        step: "awaiting_due_date",
+        requesterName,
+        requesterPhone: from,
+        partNumber: info.partNumber,
+        partDescription: info.partDescription,
+        quantityRequested: "",
+        notes: cleanBody
+      });
+
+      return (
+        "I can add this to Jonathan's next Purchase Order Request list.\n\n" +
+        "Part Number: " + (info.partNumber || "Not provided") + "\n" +
+        "Description: " + (info.partDescription || "Not provided") + "\n\n" +
+        "What requested due date should I use?\n\n" +
+        "Examples: 6/20, next Friday, ASAP, or within 2 weeks."
+      );
+    }
 
     return (
-      "I can add this to Jonathan's next Purchase Order Request list.\n\n" +
-      "Part Number: " + (info.partNumber || "Not provided") + "\n" +
-      "Description: " + (info.partDescription || "Not provided") + "\n\n" +
-      "What requested due date should I use?\n\n" +
-      "Examples: 6/20, next Friday, ASAP, or within 2 weeks."
+      "For parts questions, tell me the part number if you know it, the machine or area, and whether it is urgent.\n\n" +
+      "Example: i need part 12345"
     );
   }
 
   if (msg === "ink" || msg.includes("ink")) {
     return (
-      "INK MODE\n\n" +
-      "For ink questions, include:\n" +
-      "- Pantone / color\n" +
-      "- Machine\n" +
-      "- Job or customer if known\n" +
-      "- Whether this is urgent\n\n" +
-      "JARVIS will use Jonathan's ink notes, formulas, inventory notes, and INX premade ink notes when available.\n\n" +
-      "If I cannot answer confidently, I should escalate instead of guessing."
+      "For ink questions, include the color or Pantone number, machine, job/customer if known, and whether it is urgent.\n\n" +
+      "Example: do we have ink 186?\n\n" +
+      "I will use Jonathan's ink notes once they are loaded. If I cannot answer confidently, I should escalate instead of guessing."
     );
   }
 
@@ -341,12 +324,7 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
     msg.includes("thermostat")
   ) {
     return (
-      "HVAC MODE\n\n" +
-      "For AC issues, include:\n" +
-      "- Warehouse: WH1, WH2, WH3, or WH4\n" +
-      "- Area affected\n" +
-      "- Thermostat reading if known\n" +
-      "- Photos/video of rooftop unit or diagnostics if available\n\n" +
+      "For HVAC / AC questions, include the warehouse or department, area affected, thermostat reading if known, and photos/video if available.\n\n" +
       "Do not reset diagnostics unless instructed.\n\n" +
       "JARVIS should escalate to Jonathan before recommending vendor calls unless there is a clear emergency rule."
     );
@@ -360,32 +338,26 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
     msg.includes("eye wash")
   ) {
     return (
-      "MAPS MODE\n\n" +
-      "Planned map layers:\n" +
+      "Map support is planned for:\n\n" +
       "- HVAC thermostat locations\n" +
       "- Fire extinguisher locations\n" +
       "- Eye wash station locations\n" +
       "- Parts / ink reference locations\n\n" +
-      "Map images will be added after Jonathan uploads the facility maps.\n\n" +
-      "For now, ask something like:\n" +
-      "\"Where is the WH2 thermostat?\""
+      "Map images will be added after Jonathan uploads the facility maps."
     );
   }
 
-  if (msg === "orders" || msg.includes("order")) {
+  if (msg.includes("order") || msg.includes("ordered")) {
     return (
-      "ORDERS MODE\n\n" +
-      "Ask about open parts, ink, vendor orders, or expected deliveries.\n\n" +
-      "Example:\n" +
-      "\"Did Jonathan order doctor blades?\"\n\n" +
-      "JARVIS will eventually check the shared order notes and purchase request spreadsheet."
+      "For order questions, include the part, vendor, machine, or item you are asking about.\n\n" +
+      "Example: did Jonathan order doctor blades?\n\n" +
+      "Open order notes are not fully loaded yet."
     );
   }
 
-  if (msg === "jonathan" || msg.includes("escalate")) {
+  if (msg.includes("jonathan") || msg.includes("escalate")) {
     return (
-      "JONATHAN ESCALATION\n\n" +
-      "If JARVIS cannot answer confidently, it should escalate to Jonathan instead of guessing.\n\n" +
+      "If I cannot answer confidently, I should escalate to Jonathan instead of guessing.\n\n" +
       "High-priority purchase requests, urgent HVAC issues, unclear safety issues, and missing critical information should be escalated."
     );
   }
@@ -393,15 +365,8 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
   return (
     "I received your question:\n\n" +
     `"${cleanBody}"\n\n` +
-    "I am still in setup mode and do not have the full knowledge base loaded yet.\n\n" +
-    "For now, try asking about:\n" +
-    "- Parts requests\n" +
-    "- Ink\n" +
-    "- HVAC / AC\n" +
-    "- Maps\n" +
-    "- Open orders\n\n" +
-    "For a purchase request, type something like:\n" +
-    "Need part 12345 bearing"
+    "I do not have enough information loaded to answer that confidently yet.\n\n" +
+    "For now, try asking about parts requests, ink, HVAC / AC, maps, or open orders."
   );
 }
 
@@ -416,14 +381,10 @@ function getAskPageHtml() {
     :root {
       --blue: #123a63;
       --blue2: #0f2f52;
-      --light-blue: #eaf3fb;
-      --steel: #5f7f9d;
-      --gray: #f4f6f8;
       --dark: #1f2933;
       --border: #d6dee8;
       --green: #ecfdf3;
       --green-border: #a6d9b7;
-      --user: #eef2f7;
     }
 
     * {
@@ -457,57 +418,23 @@ function getAskPageHtml() {
       flex: 0 0 auto;
       background: linear-gradient(135deg, var(--blue), var(--blue2));
       color: white;
-      padding: 14px 16px 12px;
+      padding: 15px 16px 13px;
       box-shadow: 0 2px 10px rgba(15, 23, 42, 0.18);
       z-index: 2;
+      text-align: center;
     }
 
-    .header-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-
-    .title h1 {
+    .header h1 {
       margin: 0;
       font-size: 30px;
       letter-spacing: 3px;
       line-height: 1;
     }
 
-    .title p {
-      margin: 5px 0 0;
+    .header p {
+      margin: 6px 0 0;
       font-size: 12px;
       opacity: 0.95;
-    }
-
-    .status {
-      background: rgba(255, 255, 255, 0.12);
-      border: 1px solid rgba(255, 255, 255, 0.28);
-      padding: 7px 9px;
-      border-radius: 999px;
-      font-size: 12px;
-      white-space: nowrap;
-    }
-
-    .quick-buttons {
-      display: flex;
-      gap: 7px;
-      overflow-x: auto;
-      padding-top: 11px;
-      -webkit-overflow-scrolling: touch;
-    }
-
-    .quick-buttons button {
-      flex: 0 0 auto;
-      background: rgba(255, 255, 255, 0.12);
-      color: white;
-      border: 1px solid rgba(255, 255, 255, 0.28);
-      border-radius: 999px;
-      padding: 8px 11px;
-      font-size: 13px;
-      cursor: pointer;
     }
 
     .chat {
@@ -558,12 +485,6 @@ function getAskPageHtml() {
       background: var(--green);
       border: 1px solid var(--green-border);
       border-bottom-left-radius: 6px;
-    }
-
-    .label {
-      font-size: 12px;
-      color: #64748b;
-      margin: 0 0 3px 4px;
     }
 
     .composer {
@@ -625,6 +546,14 @@ function getAskPageHtml() {
       cursor: wait;
     }
 
+    .examples {
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 7px;
+      line-height: 1.35;
+      text-align: center;
+    }
+
     .fine-print {
       font-size: 11px;
       color: #64748b;
@@ -638,12 +567,8 @@ function getAskPageHtml() {
         border-right: none;
       }
 
-      .title h1 {
+      .header h1 {
         font-size: 26px;
-      }
-
-      .status {
-        display: none;
       }
 
       .bubble {
@@ -673,22 +598,8 @@ function getAskPageHtml() {
 <body>
   <div class="app">
     <header class="header">
-      <div class="header-row">
-        <div class="title">
-          <h1>J.A.R.V.I.S.</h1>
-          <p>Jonathan's Automated Resource &amp; Virtual Information System</p>
-        </div>
-        <div class="status">Web version online</div>
-      </div>
-
-      <div class="quick-buttons">
-        <button type="button" onclick="quickAsk('HELP')">Help</button>
-        <button type="button" onclick="quickAsk('PARTS')">Parts</button>
-        <button type="button" onclick="quickAsk('INK')">Ink</button>
-        <button type="button" onclick="quickAsk('HVAC')">HVAC / AC</button>
-        <button type="button" onclick="quickAsk('MAPS')">Maps</button>
-        <button type="button" onclick="quickAsk('ORDERS')">Orders</button>
-      </div>
+      <h1>J.A.R.V.I.S.</h1>
+      <p>Jonathan's Automated Resource &amp; Virtual Information System</p>
     </header>
 
     <main id="chat" class="chat"></main>
@@ -701,6 +612,10 @@ function getAskPageHtml() {
       <div class="input-row">
         <textarea id="question" placeholder="Ask JARVIS like you would ask Jonathan..."></textarea>
         <button id="askButton" class="send" type="button" onclick="askJarvis()">Ask</button>
+      </div>
+
+      <div class="examples">
+        Examples: “do we have ink 186?” • “i need part 12345” • “where is the thermostat for the envelope department?”
       </div>
 
       <div class="fine-print">
@@ -744,11 +659,6 @@ function getAskPageHtml() {
       wrap.appendChild(bubble);
       chat.appendChild(wrap);
       scrollChatToBottom();
-    }
-
-    function quickAsk(text) {
-      document.getElementById("question").value = text;
-      askJarvis();
     }
 
     async function askJarvis() {
@@ -811,10 +721,7 @@ function getAskPageHtml() {
         document.getElementById("name").value = savedName;
       }
 
-      addMessage(
-        "JARVIS online. Ask me a work question like you would ask Jonathan.\\n\\nTry: HELP, PARTS, INK, HVAC, MAPS, or ORDERS.",
-        "system"
-      );
+      addMessage("What can I help you with?", "system");
 
       document.getElementById("question").addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !event.shiftKey) {
