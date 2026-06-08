@@ -9,8 +9,6 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Temporary in-memory conversation state.
-// Good enough for v1 web demo. Later we can move this to a database or sheet-backed sessions.
 const pendingRequests = new Map();
 
 function normalize(text) {
@@ -68,7 +66,6 @@ function isHighPriorityDueDate(dueDateText) {
     return true;
   }
 
-  // Simple date parser for dates like 6/20 or 06/20/2026.
   const match = text.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
 
   if (!match) {
@@ -418,6 +415,7 @@ function getAskPageHtml() {
   <style>
     :root {
       --blue: #123a63;
+      --blue2: #0f2f52;
       --light-blue: #eaf3fb;
       --steel: #5f7f9d;
       --gray: #f4f6f8;
@@ -425,215 +423,290 @@ function getAskPageHtml() {
       --border: #d6dee8;
       --green: #ecfdf3;
       --green-border: #a6d9b7;
+      --user: #eef2f7;
     }
 
-    body {
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      height: 100%;
       margin: 0;
       font-family: Arial, Helvetica, sans-serif;
-      background: linear-gradient(180deg, #f6f9fc 0%, #ffffff 100%);
+      background: #f6f9fc;
       color: var(--dark);
     }
 
-    .page {
-      max-width: 820px;
-      margin: 0 auto;
-      padding: 18px;
-    }
-
-    .card {
-      background: white;
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08);
+    body {
       overflow: hidden;
     }
 
+    .app {
+      height: 100dvh;
+      max-width: 860px;
+      margin: 0 auto;
+      background: white;
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+    }
+
     .header {
-      background: var(--blue);
+      flex: 0 0 auto;
+      background: linear-gradient(135deg, var(--blue), var(--blue2));
       color: white;
-      padding: 22px 20px;
-      text-align: center;
+      padding: 14px 16px 12px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.18);
+      z-index: 2;
     }
 
-    .header h1 {
+    .header-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .title h1 {
       margin: 0;
-      font-size: 42px;
-      letter-spacing: 4px;
+      font-size: 30px;
+      letter-spacing: 3px;
+      line-height: 1;
     }
 
-    .header p {
-      margin: 8px 0 0;
-      font-size: 15px;
+    .title p {
+      margin: 5px 0 0;
+      font-size: 12px;
       opacity: 0.95;
     }
 
-    .content {
-      padding: 20px;
+    .status {
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      padding: 7px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      white-space: nowrap;
     }
 
-    .notice {
-      background: var(--light-blue);
-      border: 1px solid #c8dcef;
-      border-radius: 14px;
-      padding: 12px 14px;
-      margin-bottom: 16px;
-      font-size: 15px;
-      line-height: 1.4;
+    .quick-buttons {
+      display: flex;
+      gap: 7px;
+      overflow-x: auto;
+      padding-top: 11px;
+      -webkit-overflow-scrolling: touch;
     }
 
-    label {
-      display: block;
-      font-weight: bold;
-      margin: 14px 0 6px;
-    }
-
-    input, textarea {
-      width: 100%;
-      box-sizing: border-box;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 13px;
-      font-size: 17px;
-      font-family: Arial, Helvetica, sans-serif;
-    }
-
-    textarea {
-      min-height: 118px;
-      resize: vertical;
-    }
-
-    button {
-      width: 100%;
-      margin-top: 14px;
-      background: var(--blue);
+    .quick-buttons button {
+      flex: 0 0 auto;
+      background: rgba(255, 255, 255, 0.12);
       color: white;
-      border: none;
-      border-radius: 14px;
-      padding: 16px;
-      font-size: 19px;
-      font-weight: bold;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 999px;
+      padding: 8px 11px;
+      font-size: 13px;
       cursor: pointer;
     }
 
-    button:disabled {
+    .chat {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 16px 14px;
+      background:
+        radial-gradient(circle at top left, rgba(18,58,99,0.06), transparent 35%),
+        #f7f9fc;
+    }
+
+    .bubble-wrap {
+      display: flex;
+      margin: 10px 0;
+    }
+
+    .bubble-wrap.user-wrap {
+      justify-content: flex-end;
+    }
+
+    .bubble-wrap.jarvis-wrap {
+      justify-content: flex-start;
+    }
+
+    .bubble {
+      max-width: 82%;
+      white-space: pre-wrap;
+      line-height: 1.42;
+      border-radius: 18px;
+      padding: 12px 14px;
+      font-size: 16px;
+      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
+    }
+
+    .bubble.user {
+      background: var(--blue);
+      color: white;
+      border-bottom-right-radius: 6px;
+    }
+
+    .bubble.jarvis {
+      background: white;
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 6px;
+    }
+
+    .bubble.system {
+      background: var(--green);
+      border: 1px solid var(--green-border);
+      border-bottom-left-radius: 6px;
+    }
+
+    .label {
+      font-size: 12px;
+      color: #64748b;
+      margin: 0 0 3px 4px;
+    }
+
+    .composer {
+      flex: 0 0 auto;
+      background: white;
+      border-top: 1px solid var(--border);
+      padding: 10px;
+      box-shadow: 0 -2px 10px rgba(15, 23, 42, 0.06);
+    }
+
+    .name-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .name-row input {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-size: 15px;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+
+    textarea {
+      flex: 1 1 auto;
+      min-height: 48px;
+      max-height: 120px;
+      resize: none;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 12px;
+      font-size: 16px;
+      font-family: Arial, Helvetica, sans-serif;
+      line-height: 1.3;
+    }
+
+    .send {
+      flex: 0 0 auto;
+      background: var(--blue);
+      color: white;
+      border: none;
+      border-radius: 16px;
+      padding: 13px 17px;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+      min-height: 48px;
+    }
+
+    .send:disabled {
       background: #8aa0b7;
       cursor: wait;
     }
 
-    .quick-buttons {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 8px;
-      margin: 14px 0 6px;
-    }
-
-    .quick-buttons button {
-      margin: 0;
-      background: #eef4fa;
-      color: var(--blue);
-      border: 1px solid #cbd9e6;
-      font-size: 15px;
-      padding: 11px;
-    }
-
-    .chat {
-      margin-top: 20px;
-      border-top: 1px solid var(--border);
-      padding-top: 14px;
-    }
-
-    .message {
-      white-space: pre-wrap;
-      line-height: 1.45;
-      border-radius: 14px;
-      padding: 13px 14px;
-      margin: 10px 0;
-      font-size: 16px;
-    }
-
-    .user {
-      background: var(--gray);
-      border: 1px solid #e0e5eb;
-    }
-
-    .jarvis {
-      background: var(--green);
-      border: 1px solid var(--green-border);
-    }
-
-    .footer {
-      font-size: 13px;
-      color: #5d6976;
-      margin-top: 16px;
-      line-height: 1.4;
-    }
-
-    .small {
-      font-size: 13px;
+    .fine-print {
+      font-size: 11px;
       color: #64748b;
-      margin-top: 8px;
+      margin-top: 6px;
+      text-align: center;
     }
 
-    @media (max-width: 520px) {
-      .header h1 {
-        font-size: 34px;
+    @media (max-width: 560px) {
+      .app {
+        border-left: none;
+        border-right: none;
       }
 
-      .quick-buttons {
-        grid-template-columns: 1fr;
+      .title h1 {
+        font-size: 26px;
       }
 
-      .page {
-        padding: 10px;
+      .status {
+        display: none;
       }
 
-      .content {
-        padding: 16px;
+      .bubble {
+        max-width: 90%;
+        font-size: 15px;
+      }
+
+      .header {
+        padding: 13px 12px 10px;
+      }
+
+      .chat {
+        padding: 12px 10px;
+      }
+
+      .composer {
+        padding: 9px;
+      }
+
+      .send {
+        padding-left: 14px;
+        padding-right: 14px;
       }
     }
   </style>
 </head>
 <body>
-  <div class="page">
-    <div class="card">
-      <div class="header">
-        <h1>J.A.R.V.I.S.</h1>
-        <p>Jonathan's Automated Resource &amp; Virtual Information System</p>
+  <div class="app">
+    <header class="header">
+      <div class="header-row">
+        <div class="title">
+          <h1>J.A.R.V.I.S.</h1>
+          <p>Jonathan's Automated Resource &amp; Virtual Information System</p>
+        </div>
+        <div class="status">Web version online</div>
       </div>
 
-      <div class="content">
-        <div class="notice">
-          Ask JARVIS a work question like you would ask Jonathan. JARVIS is still being built, so if it does not know, it should not guess.
-        </div>
-
-        <label for="name">Your name</label>
-        <input id="name" placeholder="Example: Joe, Perry, Carrie, Eddie" autocomplete="name" />
-
-        <label for="question">Ask JARVIS</label>
-        <textarea id="question" placeholder="Example: Need part 12345 bearing"></textarea>
-
-        <div class="quick-buttons">
-          <button type="button" onclick="quickAsk('HELP')">Help</button>
-          <button type="button" onclick="quickAsk('PARTS')">Parts</button>
-          <button type="button" onclick="quickAsk('INK')">Ink</button>
-          <button type="button" onclick="quickAsk('HVAC')">HVAC / AC</button>
-          <button type="button" onclick="quickAsk('MAPS')">Maps</button>
-          <button type="button" onclick="quickAsk('ORDERS')">Open Orders</button>
-        </div>
-
-        <button id="askButton" type="button" onclick="askJarvis()">Ask JARVIS</button>
-
-        <div class="small">
-          Parts requests added through JARVIS are requests only. They are not ordered until Jonathan reviews them.
-        </div>
-
-        <div id="chat" class="chat"></div>
-
-        <div class="footer">
-          Current v1 focus: parts requests, ink notes, HVAC/AC routing, maps, open orders, and escalation. Machine troubleshooting is not loaded yet.
-        </div>
+      <div class="quick-buttons">
+        <button type="button" onclick="quickAsk('HELP')">Help</button>
+        <button type="button" onclick="quickAsk('PARTS')">Parts</button>
+        <button type="button" onclick="quickAsk('INK')">Ink</button>
+        <button type="button" onclick="quickAsk('HVAC')">HVAC / AC</button>
+        <button type="button" onclick="quickAsk('MAPS')">Maps</button>
+        <button type="button" onclick="quickAsk('ORDERS')">Orders</button>
       </div>
-    </div>
+    </header>
+
+    <main id="chat" class="chat"></main>
+
+    <footer class="composer">
+      <div class="name-row">
+        <input id="name" placeholder="Your name, example: Joe" autocomplete="name" />
+      </div>
+
+      <div class="input-row">
+        <textarea id="question" placeholder="Ask JARVIS like you would ask Jonathan..."></textarea>
+        <button id="askButton" class="send" type="button" onclick="askJarvis()">Ask</button>
+      </div>
+
+      <div class="fine-print">
+        Parts requests are not ordered until Jonathan reviews them. Machine troubleshooting is not loaded yet.
+      </div>
+    </footer>
   </div>
 
   <script>
@@ -653,13 +726,24 @@ function getAskPageHtml() {
       return id;
     }
 
+    function scrollChatToBottom() {
+      const chat = document.getElementById("chat");
+      chat.scrollTop = chat.scrollHeight;
+    }
+
     function addMessage(text, type) {
       const chat = document.getElementById("chat");
-      const div = document.createElement("div");
-      div.className = "message " + type;
-      div.textContent = text;
-      chat.appendChild(div);
-      div.scrollIntoView({ behavior: "smooth", block: "end" });
+
+      const wrap = document.createElement("div");
+      wrap.className = "bubble-wrap " + (type === "user" ? "user-wrap" : "jarvis-wrap");
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble " + type;
+      bubble.textContent = text;
+
+      wrap.appendChild(bubble);
+      chat.appendChild(wrap);
+      scrollChatToBottom();
     }
 
     function quickAsk(text) {
@@ -676,16 +760,16 @@ function getAskPageHtml() {
       const question = questionInput.value.trim();
 
       if (!question) {
-        alert("Type a question for JARVIS first.");
+        questionInput.focus();
         return;
       }
 
       localStorage.setItem("jarvisName", name);
 
       button.disabled = true;
-      button.textContent = "Asking JARVIS...";
+      button.textContent = "...";
 
-      addMessage((name ? name + ": " : "You: ") + question, "user");
+      addMessage(question, "user");
       questionInput.value = "";
 
       try {
@@ -707,16 +791,17 @@ function getAskPageHtml() {
           throw new Error(data.error || "Request failed");
         }
 
-        addMessage("JARVIS:\\n" + data.reply, "jarvis");
+        addMessage(data.reply, "jarvis");
       } catch (error) {
         addMessage(
-          "JARVIS:\\nI had a problem answering that. Jonathan needs to check the JARVIS logs.\\n\\nError: " + error.message,
-          "jarvis"
+          "I had a problem answering that. Jonathan needs to check the JARVIS logs.\\n\\nError: " + error.message,
+          "system"
         );
       } finally {
         button.disabled = false;
-        button.textContent = "Ask JARVIS";
+        button.textContent = "Ask";
         questionInput.focus();
+        scrollChatToBottom();
       }
     }
 
@@ -726,19 +811,25 @@ function getAskPageHtml() {
         document.getElementById("name").value = savedName;
       }
 
+      addMessage(
+        "JARVIS online. Ask me a work question like you would ask Jonathan.\\n\\nTry: HELP, PARTS, INK, HVAC, MAPS, or ORDERS.",
+        "system"
+      );
+
       document.getElementById("question").addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !event.shiftKey) {
           event.preventDefault();
           askJarvis();
         }
       });
+
+      document.getElementById("question").focus();
     });
   </script>
 </body>
 </html>`;
 }
 
-// Main web interface
 app.get("/", (_req, res) => {
   res.redirect("/ask");
 });
@@ -748,13 +839,11 @@ app.get("/ask", (_req, res) => {
   res.type("html").send(getAskPageHtml());
 });
 
-// Health check
 app.get("/health", (_req, res) => {
   console.log("Health check hit");
   res.status(200).send("J.A.R.V.I.S. online.");
 });
 
-// Web ask API
 app.post("/api/ask", async (req, res) => {
   try {
     const sessionId = normalize(req.body.sessionId) || "web-unknown";
@@ -796,7 +885,6 @@ app.post("/api/ask", async (req, res) => {
   }
 });
 
-// Browser test route
 app.get("/test", async (req, res) => {
   const body = req.query.body || "HELP";
   const from = req.query.from || "browser-test";
@@ -818,7 +906,6 @@ app.get("/test", async (req, res) => {
   res.type("text/plain").send(reply);
 });
 
-// SMS route kept for later, but SMS is not the v1 launch path.
 app.post("/sms", async (req, res) => {
   try {
     console.log("====================================");
