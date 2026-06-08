@@ -10,7 +10,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 // Temporary in-memory conversation state.
-// Good enough for demo. Later we will replace this with a spreadsheet/database workflow.
+// Good enough for demo. Later we can replace this with a database.
 const pendingRequests = new Map();
 
 function normalize(text) {
@@ -21,11 +21,118 @@ function lower(text) {
   return normalize(text).toLowerCase();
 }
 
-function getJarvisReply({ from = "browser-test", body = "" }) {
+function extractSimplePartInfo(text) {
+  const cleaned = normalize(text)
+    .replace(/^request part/i, "")
+    .replace(/^add part/i, "")
+    .replace(/^need part/i, "")
+    .trim();
+
+  // Very simple first pass:
+  // "12345 bearing" -> partNumber: 12345, partDescription: bearing
+  const match = cleaned.match(/^([A-Za-z0-9\-_.]+)\s*(.*)$/);
+
+  if (!match) {
+    return {
+      partNumber: "",
+      partDescription: cleaned || text
+    };
+  }
+
+  return {
+    partNumber: match[1] || "",
+    partDescription: match[2] || ""
+  };
+}
+
+function isHighPriorityDueDate(dueDateText) {
+  const text = lower(dueDateText);
+
+  if (
+    text.includes("asap") ||
+    text.includes("urgent") ||
+    text.includes("today") ||
+    text.includes("tomorrow") ||
+    text.includes("this week") ||
+    text.includes("next week") ||
+    text.includes("within 2 weeks") ||
+    text.includes("within two weeks")
+  ) {
+    return true;
+  }
+
+  // Simple date parser for dates like 6/20 or 06/20/2026.
+  const match = text.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+
+  if (!match) {
+    return false;
+  }
+
+  const now = new Date();
+  const month = Number(match[1]) - 1;
+  const day = Number(match[2]);
+  let year = match[3] ? Number(match[3]) : now.getFullYear();
+
+  if (year < 100) {
+    year += 2000;
+  }
+
+  const due = new Date(year, month, day);
+  const diffMs = due.getTime() - now.getTime();
+  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+
+  return diffDays <= 14;
+}
+
+async function writePartsRequestToSheet(request) {
+  const webhookUrl = process.env.PARTS_REQUEST_WEBHOOK_URL;
+  const secret = process.env.PARTS_REQUEST_SECRET;
+
+  if (!webhookUrl || !secret) {
+    console.warn("Missing PARTS_REQUEST_WEBHOOK_URL or PARTS_REQUEST_SECRET");
+    return {
+      ok: false,
+      error: "Missing spreadsheet webhook configuration"
+    };
+  }
+
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      secret,
+      requesterName: request.requesterName || "",
+      requesterPhone: request.requesterPhone || "",
+      machineOrArea: request.machineOrArea || "",
+      partNumber: request.partNumber || "",
+      partDescription: request.partDescription || "",
+      quantityRequested: request.quantityRequested || "",
+      requestedDueDate: request.requestedDueDate || "",
+      priority: request.priority || "Normal",
+      notes: request.notes || "",
+      status: request.status || "New",
+      jonathanNotified: request.jonathanNotified || "No"
+    })
+  });
+
+  const text = await response.text();
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {
+      ok: response.ok,
+      raw: text
+    };
+  }
+}
+
+async function getJarvisReply({ from = "browser-test", body = "" }) {
   const cleanBody = normalize(body);
   const msg = lower(cleanBody);
 
-  // Handle a pending purchase request flow
   const pending = pendingRequests.get(from);
 
   if (pending) {
@@ -42,18 +149,68 @@ function getJarvisReply({ from = "browser-test", body = "" }) {
 
     if (pending.step === "awaiting_machine") {
       pending.machineOrArea = cleanBody;
-      pending.step = "complete";
+
+      const priority = isHighPriorityDueDate(pending.requestedDueDate)
+        ? "High"
+        : "Normal";
+
+      const jonathanNotified = priority === "High" ? "Needs Notification" : "No";
+
+      const sheetRequest = {
+        requesterName: pending.requesterName || "",
+        requesterPhone: from,
+        machineOrArea: pending.machineOrArea,
+        partNumber: pending.partNumber,
+        partDescription: pending.partDescription,
+        quantityRequested: pending.quantityRequested || "",
+        requestedDueDate: pending.requestedDueDate,
+        priority,
+        notes: pending.notes || "",
+        status: "New",
+        jonathanNotified
+      };
+
+      let sheetResult;
+
+      try {
+        sheetResult = await writePartsRequestToSheet(sheetRequest);
+      } catch (error) {
+        console.error("Failed to write parts request to sheet:", error);
+        sheetResult = {
+          ok: false,
+          error: error.toString()
+        };
+      }
+
       pendingRequests.delete(from);
 
-      // Later this will write to the shared spreadsheet.
-      return (
-        "Purchase request captured for Jonathan's review.\n\n" +
-        "Part / Item: " + pending.partInfo + "\n" +
-        "Requested Due Date: " + pending.requestedDueDate + "\n" +
-        "Machine / Area: " + pending.machineOrArea + "\n\n" +
-        "Status: Added to the JARVIS request queue for demo purposes.\n\n" +
-        "Important: This is not ordered yet. Jonathan still needs to review it."
-      );
+      if (!sheetResult.ok) {
+        return (
+          "I captured the request, but I could not write it to the shared spreadsheet.\n\n" +
+          "Part Number: " + sheetRequest.partNumber + "\n" +
+          "Description: " + sheetRequest.partDescription + "\n" +
+          "Requested Due Date: " + sheetRequest.requestedDueDate + "\n" +
+          "Machine / Area: " + sheetRequest.machineOrArea + "\n\n" +
+          "Jonathan needs to check the JARVIS logs.\n\n" +
+          "Important: This is not ordered yet."
+        );
+      }
+
+      let reply =
+        "Added to Jonathan's Purchase Order Request list.\n\n" +
+        "Part Number: " + (sheetRequest.partNumber || "Not provided") + "\n" +
+        "Description: " + (sheetRequest.partDescription || "Not provided") + "\n" +
+        "Requested Due Date: " + sheetRequest.requestedDueDate + "\n" +
+        "Machine / Area: " + sheetRequest.machineOrArea + "\n" +
+        "Priority: " + priority + "\n\n" +
+        "Important: This is not ordered yet. Jonathan still needs to review it.";
+
+      if (priority === "High") {
+        reply +=
+          "\n\nThis was marked HIGH priority because the requested due date appears to be within 2 weeks or urgent.";
+      }
+
+      return reply;
     }
   }
 
@@ -81,24 +238,32 @@ function getJarvisReply({ from = "browser-test", body = "" }) {
       "- Description or photo if part number is unknown\n" +
       "- Quantity needed\n" +
       "- Whether the machine is down\n\n" +
-      "If the part is not available, JARVIS can add it to Jonathan's next Purchase Order Request list."
+      "If the part is not available, JARVIS can add it to Jonathan's next Purchase Order Request list.\n\n" +
+      "For a request demo, text:\n" +
+      "Need part 12345 bearing"
     );
   }
 
-  if (msg.startsWith("request part") || msg.startsWith("add part") || msg.startsWith("need part")) {
-    const partInfo = cleanBody
-      .replace(/^request part/i, "")
-      .replace(/^add part/i, "")
-      .replace(/^need part/i, "")
-      .trim();
+  if (
+    msg.startsWith("request part") ||
+    msg.startsWith("add part") ||
+    msg.startsWith("need part")
+  ) {
+    const info = extractSimplePartInfo(cleanBody);
 
     pendingRequests.set(from, {
       step: "awaiting_due_date",
-      partInfo: partInfo || cleanBody
+      requesterPhone: from,
+      partNumber: info.partNumber,
+      partDescription: info.partDescription,
+      quantityRequested: "",
+      notes: cleanBody
     });
 
     return (
       "I can add this to Jonathan's next Purchase Order Request list.\n\n" +
+      "Part Number: " + (info.partNumber || "Not provided") + "\n" +
+      "Description: " + (info.partDescription || "Not provided") + "\n\n" +
       "What requested due date should I use?\n\n" +
       "Examples: 6/20, next Friday, ASAP, or within 2 weeks."
     );
@@ -177,11 +342,11 @@ app.get("/", (_req, res) => {
 });
 
 // Browser test route
-app.get("/test", (req, res) => {
+app.get("/test", async (req, res) => {
   const body = req.query.body || "HELP";
   const from = req.query.from || "browser-test";
 
-  const reply = getJarvisReply({ from, body });
+  const reply = await getJarvisReply({ from, body });
 
   console.log("Browser test hit:", { from, body, reply });
 
@@ -201,9 +366,8 @@ app.post("/sms", async (req, res) => {
     const city = req.body.FromCity || "";
     const state = req.body.FromState || "";
 
-    const reply = getJarvisReply({ from, body });
+    const reply = await getJarvisReply({ from, body });
 
-    // Optional Teams notification
     const teamsWebhook = process.env.TEAMS_WEBHOOK_URL;
 
     if (teamsWebhook) {
