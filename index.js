@@ -90,8 +90,12 @@ function walkFiles(dir) {
 
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) files.push(...walkFiles(fullPath));
-    else files.push(fullPath);
+
+    if (entry.isDirectory()) {
+      files.push(...walkFiles(fullPath));
+    } else {
+      files.push(fullPath);
+    }
   }
 
   return files;
@@ -164,6 +168,7 @@ function addKnowledgeRecord(record) {
 
 function loadMarkdownFile(filePath) {
   const body = fs.readFileSync(filePath, "utf8");
+
   addKnowledgeRecord({
     type: "document",
     category: categoryFromFile(filePath),
@@ -184,7 +189,8 @@ function loadWorkbookFile(filePath) {
   const workbook = XLSX.readFile(filePath, { cellDates: true });
 
   for (const sheetName of workbook.SheetNames) {
-        if (/^README$/i.test(sheetName)) continue;
+    if (/^README$/i.test(sheetName)) continue;
+
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
 
@@ -194,6 +200,7 @@ function loadWorkbookFile(filePath) {
       for (const [key, value] of Object.entries(row)) {
         const cleanKey = normalize(key);
         const cleanValue = cleanCellValue(value);
+
         if (!cleanKey || cleanKey.startsWith("__EMPTY")) continue;
         fields[cleanKey] = cleanValue;
       }
@@ -240,11 +247,16 @@ function loadKnowledgeBase() {
       const ext = getFileType(filePath);
 
       try {
-        if (["md", "txt"].includes(ext)) loadMarkdownFile(filePath);
-        else if (["xlsx", "xls"].includes(ext)) loadWorkbookFile(filePath);
-        else if (ext === "pdf") loadPdfFile(filePath);
+        if (["md", "txt"].includes(ext)) {
+          loadMarkdownFile(filePath);
+        } else if (["xlsx", "xls"].includes(ext)) {
+          loadWorkbookFile(filePath);
+        } else if (ext === "pdf") {
+          loadPdfFile(filePath);
+        }
       } catch (error) {
         console.error(`Failed to load ${rel}:`, error);
+
         addKnowledgeRecord({
           type: "load-error",
           category: categoryFromFile(filePath),
@@ -270,12 +282,14 @@ function levenshtein(a, b) {
   if (!b) return a.length;
 
   const matrix = Array.from({ length: a.length + 1 }, () => []);
+
   for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
   for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
 
   for (let i = 1; i <= a.length; i++) {
     for (let j = 1; j <= b.length; j++) {
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+
       matrix[i][j] = Math.min(
         matrix[i - 1][j] + 1,
         matrix[i][j - 1] + 1,
@@ -292,7 +306,9 @@ function categoriesForQuery(query) {
   const categories = new Set();
 
   for (const hint of CATEGORY_HINTS) {
-    if (hint.terms.some((term) => q.includes(term))) categories.add(hint.category);
+    if (hint.terms.some((term) => q.includes(term))) {
+      categories.add(hint.category);
+    }
   }
 
   if (q.includes("where") || q.includes("thermostat") || q.includes("eyewash") || q.includes("fire extinguisher")) {
@@ -317,6 +333,7 @@ function categoryBoost(query, category) {
 
   for (const hint of CATEGORY_HINTS) {
     if (hint.category !== category) continue;
+
     for (const term of hint.terms) {
       if (q.includes(term)) boost += 15;
     }
@@ -342,6 +359,7 @@ function scoreRecord(record, query) {
   }
 
   let matchedTerms = 0;
+
   for (const term of terms) {
     if (record.normalizedText.includes(term)) matchedTerms += 1;
   }
@@ -364,6 +382,7 @@ function scoreRecord(record, query) {
         const maxLen = Math.max(queryKey.length, recordKey.length);
         const distance = levenshtein(recordKey, queryKey);
         const limit = maxLen <= 6 ? 1 : 2;
+
         if (distance <= limit) {
           score += 40;
           reason.push("fuzzy key match");
@@ -375,6 +394,7 @@ function scoreRecord(record, query) {
   for (const queryDigit of queryDigits) {
     for (const recordKey of record.searchKeys || []) {
       const recordDigits = digitsOnly(recordKey);
+
       if (recordDigits === queryDigit) {
         score += 90;
         reason.push("digits-only match");
@@ -386,6 +406,7 @@ function scoreRecord(record, query) {
   }
 
   if (record.type === "spreadsheet-row") score += 5;
+
   return { score, reason };
 }
 
@@ -394,6 +415,7 @@ function searchKnowledge(query, options = {}) {
   const preferredCategories = options.categories || categoriesForQuery(query);
 
   let records = knowledgeRecords;
+
   if (preferredCategories.length) {
     const preferred = knowledgeRecords.filter((record) => preferredCategories.includes(record.category));
     if (preferred.length) records = preferred;
@@ -408,6 +430,34 @@ function searchKnowledge(query, options = {}) {
     .sort((a, b) => b.score - a.score);
 
   return scored.slice(0, maxResults);
+}
+
+function getField(fields, names) {
+  const entries = Object.entries(fields || {});
+  const wanted = names.map((name) => lower(name));
+
+  for (const [key, value] of entries) {
+    if (wanted.includes(lower(key))) return normalize(value);
+  }
+
+  for (const [key, value] of entries) {
+    const keyNorm = lower(key).replace(/[^a-z0-9]/g, "");
+
+    for (const name of wanted) {
+      const nameNorm = name.replace(/[^a-z0-9]/g, "");
+      if (keyNorm === nameNorm) return normalize(value);
+    }
+  }
+
+  return "";
+}
+
+function isBlankOrZero(value) {
+  const clean = normalize(value);
+  if (!clean) return true;
+
+  const number = Number(clean.replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(number) && number <= 0;
 }
 
 function safeFields(fields) {
@@ -429,6 +479,7 @@ function makeExcerpt(body, query, maxLen = 800) {
 
   const qTerms = normalizeLoose(query).split(" ").filter((term) => term.length > 3);
   const lowerText = text.toLowerCase();
+
   let idx = -1;
 
   for (const term of qTerms) {
@@ -440,6 +491,7 @@ function makeExcerpt(body, query, maxLen = 800) {
 
   const start = Math.max(0, idx - 180);
   const end = Math.min(text.length, start + maxLen);
+
   return (start > 0 ? "..." : "") + text.slice(start, end) + (end < text.length ? "..." : "");
 }
 
@@ -464,32 +516,6 @@ function answerPoRequest() {
     "Important: JARVIS cannot approve purchases, create POs, or say something has been ordered unless the approved order records clearly confirm it." +
     (form ? linkLine(form) : "")
   );
-}
-
-function getField(fields, names) {
-  const entries = Object.entries(fields || {});
-  const wanted = names.map((name) => lower(name));
-
-  for (const [key, value] of entries) {
-    if (wanted.includes(lower(key))) return normalize(value);
-  }
-
-  for (const [key, value] of entries) {
-    const keyNorm = lower(key).replace(/[^a-z0-9]/g, "");
-    for (const name of wanted) {
-      const nameNorm = name.replace(/[^a-z0-9]/g, "");
-      if (keyNorm === nameNorm) return normalize(value);
-    }
-  }
-
-  return "";
-}
-
-function isBlankOrZero(value) {
-  const clean = normalize(value);
-  if (!clean) return true;
-  const number = Number(clean.replace(/[^0-9.-]/g, ""));
-  return Number.isFinite(number) && number <= 0;
 }
 
 function answerInkInventoryRow(top) {
@@ -634,21 +660,10 @@ function answerFromTopResults(query, results) {
   const top = results[0];
 
   if (top.type === "spreadsheet-row") {
-    if (top.category === "03_INK_ROOM") {
-      return answerInkInventoryRow(top);
-    }
-
-    if (top.category === "01_PARTS_INVENTORY") {
-      return answerPartsRow(top);
-    }
-
-    if (top.category === "05_KNIVES") {
-      return answerKnifeRow(top);
-    }
-
-    if (top.category === "08_MAILSHOP_EQUIPMENT_OUTGOING") {
-      return answerMailshopRow(top);
-    }
+    if (top.category === "03_INK_ROOM") return answerInkInventoryRow(top);
+    if (top.category === "01_PARTS_INVENTORY") return answerPartsRow(top);
+    if (top.category === "05_KNIVES") return answerKnifeRow(top);
+    if (top.category === "08_MAILSHOP_EQUIPMENT_OUTGOING") return answerMailshopRow(top);
 
     return answerGenericSpreadsheetRow(top);
   }
@@ -668,51 +683,6 @@ function answerFromTopResults(query, results) {
   return makeExcerpt(top.body, query, 650) + linkLine(top);
 }
 
-  const top = results[0];
-
-  if (top.type === "spreadsheet-row") {
-    let reply = `Based on the current JARVIS data, I found a likely match in ${top.sourceFile}`;
-    if (top.sheetName) reply += `, sheet ${top.sheetName}`;
-    reply += ":\n\n" + formatFields(top.fields);
-
-    if (
-      top.category.includes("PARTS") ||
-      top.category.includes("KNIVES") ||
-      top.category.includes("MAILSHOP") ||
-      top.category.includes("INK")
-    ) {
-      reply += "\n\nPlease physically verify before relying on this for production.";
-    }
-
-    const closeMatches = results.slice(1).filter((result) => result.score >= top.score - 25).slice(0, 3);
-    if (closeMatches.length) {
-      reply += "\n\nOther possible matches:";
-      for (const result of closeMatches) {
-        if (result.type === "spreadsheet-row") {
-          const safe = safeFields(result.fields);
-          const preview = Object.entries(safe).slice(0, 5).map(([k, v]) => `${k}: ${v}`).join(" | ");
-          reply += `\n- ${preview}`;
-        } else {
-          reply += `\n- ${result.title} (${result.sourceFile})`;
-        }
-      }
-      reply += "\n\nIf this is not the item you meant, ask again with more detail.";
-    }
-
-    return reply;
-  }
-
-  if (top.type === "file") {
-    return (
-      `I found a relevant reference file: ${top.sourceFile}.` +
-      linkLine(top) +
-      "\n\nIf this is a map or form, open the file and verify the exact location/details before relying on it."
-    );
-  }
-
-  return `I found this in ${top.sourceFile}:\n\n${makeExcerpt(top.body, query)}${linkLine(top)}`;
-}
-
 function extractSimplePartInfo(text) {
   const cleaned = normalize(text)
     .replace(/^i need part/i, "")
@@ -724,7 +694,11 @@ function extractSimplePartInfo(text) {
   const match = cleaned.match(/^([A-Za-z0-9\-_.\/]+)\s*(.*)$/);
 
   if (!match) return { partNumber: "", partDescription: cleaned || text };
-  return { partNumber: match[1] || "", partDescription: match[2] || "" };
+
+  return {
+    partNumber: match[1] || "",
+    partDescription: match[2] || ""
+  };
 }
 
 function isHighPriorityDueDate(dueDateText) {
@@ -761,10 +735,12 @@ function isHighPriorityDueDate(dueDateText) {
   const month = Number(match[1]) - 1;
   const day = Number(match[2]);
   let year = match[3] ? Number(match[3]) : now.getFullYear();
+
   if (year < 100) year += 2000;
 
   const due = new Date(year, month, day);
   const diffDays = (due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
+
   return diffDays <= 14;
 }
 
@@ -917,6 +893,7 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
       };
 
       let sheetResult;
+
       try {
         sheetResult = await writePartsRequestToSheet(sheetRequest);
       } catch (error) {
@@ -974,12 +951,14 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
     msg.startsWith("add part")
   ) {
     const info = extractSimplePartInfo(cleanBody);
+
     const lookupResults = searchKnowledge(info.partNumber || cleanBody, {
       maxResults: 3,
       categories: ["01_PARTS_INVENTORY"]
     });
 
     let foundNote = "";
+
     if (lookupResults.length) {
       foundNote = "\n\nI found this possible inventory match first:\n" + answerFromTopResults(info.partNumber || cleanBody, lookupResults) + "\n\n";
     }
@@ -1005,7 +984,10 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
   }
 
   const results = searchKnowledge(cleanBody, { maxResults: isDirectLookup(msg) ? 6 : 5 });
-  if (results.length) return answerFromTopResults(cleanBody, results);
+
+  if (results.length) {
+    return answerFromTopResults(cleanBody, results);
+  }
 
   return (
     "I received your question:\n\n" +
@@ -1057,24 +1039,33 @@ function getAskPageHtml() {
       <h1>J.A.R.V.I.S.</h1>
       <p>Jonathan's Automated Resource &amp; Virtual Information System</p>
     </header>
+
     <main id="chat" class="chat"></main>
+
     <footer class="composer">
-      <div class="name-row"><input id="name" placeholder="Your name, example: Joe" autocomplete="name" /></div>
+      <div class="name-row">
+        <input id="name" placeholder="Your name, example: Joe" autocomplete="name" />
+      </div>
+
       <div class="input-row">
         <textarea id="question" placeholder="Ask JARVIS like you would ask Jonathan..."></textarea>
         <button id="askButton" class="send" type="button" onclick="askJarvis()">Ask</button>
       </div>
+
       <div class="examples">Examples: “do we have ink 186?” • “i need part 12345” • “where is the thermostat for the envelope department?”</div>
       <div class="fine-print">Parts requests are not ordered until Jonathan reviews them. JARVIS answers from the current knowledge snapshot.</div>
     </footer>
   </div>
+
   <script>
     function getSessionId() {
       let id = localStorage.getItem("jarvisSessionId");
+
       if (!id) {
         id = window.crypto && crypto.randomUUID ? crypto.randomUUID() : "session-" + Date.now() + "-" + Math.random().toString(16).slice(2);
         localStorage.setItem("jarvisSessionId", id);
       }
+
       return id;
     }
 
@@ -1085,6 +1076,7 @@ function getAskPageHtml() {
 
     function addMessage(text, type) {
       const chat = document.getElementById("chat");
+
       const wrap = document.createElement("div");
       wrap.className = "bubble-wrap " + (type === "user" ? "user-wrap" : "jarvis-wrap");
 
@@ -1111,6 +1103,7 @@ function getAskPageHtml() {
       }
 
       localStorage.setItem("jarvisName", name);
+
       button.disabled = true;
       button.textContent = "...";
 
@@ -1125,11 +1118,14 @@ function getAskPageHtml() {
         });
 
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Request failed");
+
+        if (!response.ok) {
+          throw new Error(data.error || "Request failed");
+        }
 
         addMessage(data.reply, "jarvis");
       } catch (error) {
-                addMessage("I had a problem answering that. Jonathan needs to check the JARVIS logs. Error: " + error.message, "system");
+        addMessage("I had a problem answering that. Jonathan needs to check the JARVIS logs. Error: " + error.message, "system");
       } finally {
         button.disabled = false;
         button.textContent = "Ask";
@@ -1140,7 +1136,10 @@ function getAskPageHtml() {
 
     document.addEventListener("DOMContentLoaded", () => {
       const savedName = localStorage.getItem("jarvisName");
-      if (savedName) document.getElementById("name").value = savedName;
+
+      if (savedName) {
+        document.getElementById("name").value = savedName;
+      }
 
       addMessage("What can I help you with?", "system");
 
@@ -1160,7 +1159,9 @@ function getAskPageHtml() {
 
 app.use("/kb", express.static(DATA_ROOT));
 
-app.get("/", (_req, res) => res.redirect("/ask"));
+app.get("/", (_req, res) => {
+  res.redirect("/ask");
+});
 
 app.get("/ask", (_req, res) => {
   res.type("html").send(getAskPageHtml());
@@ -1179,6 +1180,7 @@ app.get("/health", (_req, res) => {
 
 app.get("/kb-status", (_req, res) => {
   const counts = {};
+
   for (const record of knowledgeRecords) {
     counts[record.category] = (counts[record.category] || 0) + 1;
   }
@@ -1203,16 +1205,35 @@ app.post("/api/ask", async (req, res) => {
     const name = normalize(req.body.name);
     const question = normalize(req.body.question);
 
-    if (!question) return res.status(400).json({ ok: false, error: "Missing question" });
+    if (!question) {
+      return res.status(400).json({ ok: false, error: "Missing question" });
+    }
 
     const from = "web:" + sessionId;
-    console.log("Web question received:", { from, name, question });
 
-    const reply = await getJarvisReply({ from, body: question, requesterName: name });
-    res.json({ ok: true, reply });
+    console.log("Web question received:", {
+      from,
+      name,
+      question
+    });
+
+    const reply = await getJarvisReply({
+      from,
+      body: question,
+      requesterName: name
+    });
+
+    res.json({
+      ok: true,
+      reply
+    });
   } catch (error) {
     console.error("Web ask error:", error);
-    res.status(500).json({ ok: false, error: error.toString() });
+
+    res.status(500).json({
+      ok: false,
+      error: error.toString()
+    });
   }
 });
 
@@ -1221,7 +1242,12 @@ app.get("/test", async (req, res) => {
   const from = req.query.from || "browser-test";
   const requesterName = req.query.name || "";
 
-  const reply = await getJarvisReply({ from, body, requesterName });
+  const reply = await getJarvisReply({
+    from,
+    body,
+    requesterName
+  });
+
   res.type("text/plain").send(reply);
 });
 
@@ -1232,9 +1258,14 @@ app.post("/sms", async (req, res) => {
     const city = req.body.FromCity || "";
     const state = req.body.FromState || "";
 
-    const reply = await getJarvisReply({ from, body, requesterName: "" });
+    const reply = await getJarvisReply({
+      from,
+      body,
+      requesterName: ""
+    });
 
     const teamsWebhook = process.env.TEAMS_WEBHOOK_URL;
+
     if (teamsWebhook) {
       try {
         await fetch(teamsWebhook, {
@@ -1251,11 +1282,14 @@ app.post("/sms", async (req, res) => {
 
     const twiml = new Twiml.MessagingResponse();
     twiml.message(reply);
+
     res.type("text/xml").send(twiml.toString());
   } catch (e) {
     console.error("JARVIS SMS handler error:", e);
+
     const twiml = new Twiml.MessagingResponse();
     twiml.message("J.A.R.V.I.S. had an internal error while processing that message. Jonathan needs to check the logs.");
+
     res.type("text/xml").send(twiml.toString());
   }
 });
@@ -1263,4 +1297,7 @@ app.post("/sms", async (req, res) => {
 loadKnowledgeBase();
 
 const port = process.env.PORT || 3001;
-app.listen(port, () => console.log(`J.A.R.V.I.S. listening on ${port}`));
+
+app.listen(port, () => {
+  console.log(`J.A.R.V.I.S. listening on ${port}`);
+});
