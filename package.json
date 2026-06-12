@@ -1,12 +1,15 @@
 {
-  "name": "absent-webhook",
+  "name": "jarvis-helper",
   "version": "1.0.0",
-  "main": "index.js",
   "type": "module",
-  "scripts": { "start": "node index.js" },
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "express": "^4.19.2",
-    "twilio": "^4.22.0",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "twilio": "^5.2.2",
+    "xlsx": "^0.18.5"
   }
 }
