@@ -54,7 +54,7 @@ const CATEGORY_HINTS = [
   },
   {
     category: "05_KNIVES",
-    terms: ["knife", "knives", "cutoff", "cut-off", "profile", "sharpen", "sharpening"]
+    terms: ["knife", "knives", "cutoff", "cut-off", "profile", "side knife", "sharpen", "sharpening"]
   },
   {
     category: "06_PURCHASING_PO_REQUESTS",
@@ -399,6 +399,61 @@ function levenshtein(a, b) {
   return matrix[a.length][b.length];
 }
 
+function hasExplicitKnifeLanguage(query) {
+  const q = lower(query);
+
+  return (
+    q.includes("knife") ||
+    q.includes("knives") ||
+    q.includes("profile knife") ||
+    q.includes("profile knives") ||
+    q.includes("side knife") ||
+    q.includes("side knives") ||
+    q.includes("cutoff knife") ||
+    q.includes("cut-off knife") ||
+    q.includes("cut off knife") ||
+    q.includes("straight cutoff") ||
+    q.includes("straight cut-off") ||
+    q.includes("straight cut off") ||
+    q.includes("sharpen") ||
+    q.includes("sharpening")
+  );
+}
+
+function looksLikePartNumber(query) {
+  const q = normalize(query);
+
+  if (!q) return false;
+
+  const tokens = q.match(/[A-Za-z0-9][A-Za-z0-9._\-/]{1,}[A-Za-z0-9]/g) || [];
+
+  for (const token of tokens) {
+    const normalized = normalizePart(token);
+
+    if (normalized.length < 3) continue;
+
+    const hasLetter = /[A-Z]/.test(normalized);
+    const hasDigit = /\d/.test(normalized);
+    const hasSeparator = /[._\-/]/.test(token);
+
+    if (hasLetter && hasDigit) return true;
+
+    if (hasSeparator && hasDigit && normalized.length >= 4) return true;
+  }
+
+  const lowerQ = lower(query);
+
+  if (/\b\d{3,6}\s*(zz|z|rs|c3|c4|2rs|rsr|llu|llb)\b/i.test(lowerQ)) {
+    return true;
+  }
+
+  if (/\b(k|v|p|m|a|b|c|d|db|wd|w)\s*\.?\s*\d{2,}[\d.a-z\-\/]*\b/i.test(lowerQ)) {
+    return true;
+  }
+
+  return false;
+}
+
 function categoriesForQuery(query) {
   const q = lower(query);
   const categories = new Set();
@@ -407,6 +462,10 @@ function categoriesForQuery(query) {
     if (hint.terms.some((term) => q.includes(term))) {
       categories.add(hint.category);
     }
+  }
+
+  if (looksLikePartNumber(q) && !hasExplicitKnifeLanguage(q)) {
+    categories.add("01_PARTS_INVENTORY");
   }
 
   if (q.includes("where") || q.includes("thermostat") || q.includes("eyewash") || q.includes("fire extinguisher")) {
@@ -435,6 +494,14 @@ function categoryBoost(query, category) {
     for (const term of hint.terms) {
       if (q.includes(term)) boost += 15;
     }
+  }
+
+  if (category === "01_PARTS_INVENTORY" && looksLikePartNumber(query) && !hasExplicitKnifeLanguage(query)) {
+    boost += 60;
+  }
+
+  if (category === "05_KNIVES" && !hasExplicitKnifeLanguage(query)) {
+    boost -= 80;
   }
 
   return boost;
@@ -1061,7 +1128,7 @@ function answerPartsLookup(query) {
   const results = searchKnowledge(query, {
     maxResults: 6,
     categories: ["01_PARTS_INVENTORY"],
-    minScore: 80
+    minScore: looksLikePartNumber(query) ? 55 : 80
   });
 
   if (results.length) return answerFromTopResults(query, results);
@@ -1215,14 +1282,20 @@ function classifyIntent(msg) {
 
   if (q.includes("magna") || q.includes("motor") || q.includes("drive") || q.includes("rebuild")) return "magna";
 
-  if (q.includes("knife") || q.includes("knives") || q.includes("cutoff") || q.includes("cut-off") || q.includes("profile")) return "knives";
-
   if (q.includes("warehouse 4") || q.includes("wh4") || q.includes("mailshop") || q.includes("building 4") || q.includes("stamper") || q.includes("fire jet") || q.includes("picked up") || q.includes("pickup")) {
     return "mailshop";
   }
 
   if (q.includes("forklift") || q.includes("certified") || q.includes("operator") || q.includes("certification") || q.includes("clamp truck") || q.includes("training")) {
     return "safety";
+  }
+
+  if (hasExplicitKnifeLanguage(q)) {
+    return "knives";
+  }
+
+  if (looksLikePartNumber(q)) {
+    return "parts_lookup";
   }
 
   if (q.includes("do we have") || q.includes("where is") || q.includes("looking for") || q.includes("find") || q.includes("on hand") || q.includes("available") || q.includes("part")) {
