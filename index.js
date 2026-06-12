@@ -568,7 +568,11 @@ function scoreRecord(record, query) {
       if (recordDigits === queryDigit) {
         score += 90;
         reason.push("digits-only match");
-      } else if (queryDigit.length >= 4 && (recordDigits.includes(queryDigit) || queryDigit.includes(recordDigits))) {
+      } else if (
+        queryDigit.length >= 4 &&
+        recordDigits.length >= 4 &&
+        (recordDigits.includes(queryDigit) || queryDigit.includes(recordDigits))
+      ) {
         score += 40;
         reason.push("partial digits match");
       }
@@ -725,6 +729,43 @@ function findBestExactFieldMatch(records, fieldNames, value) {
   return null;
 }
 
+function getPartMatchConfidence(query, record) {
+  const queryKeys = extractSearchKeys(query);
+  const recordKeys = record.searchKeys || [];
+
+  for (const queryKey of queryKeys) {
+    for (const recordKey of recordKeys) {
+      if (queryKey === recordKey) return "exact";
+    }
+  }
+
+  for (const queryKey of queryKeys) {
+    for (const recordKey of recordKeys) {
+      if (
+        queryKey.length >= 4 &&
+        recordKey.length >= 4 &&
+        (recordKey.includes(queryKey) || queryKey.includes(recordKey))
+      ) {
+        return "likely";
+      }
+    }
+  }
+
+  for (const queryKey of queryKeys) {
+    for (const recordKey of recordKeys) {
+      if (queryKey.length >= 4 && recordKey.length >= 4) {
+        const maxLen = Math.max(queryKey.length, recordKey.length);
+        const distance = levenshtein(recordKey, queryKey);
+        const limit = maxLen <= 6 ? 1 : 2;
+
+        if (distance <= limit) return "weak";
+      }
+    }
+  }
+
+  return record.score >= 120 ? "likely" : "weak";
+}
+
 function answerInkInventoryRow(top) {
   const fields = top.fields || {};
 
@@ -788,6 +829,33 @@ function answerPartsRow(top) {
   reply += "\n\nPlease physically verify before relying on it for production.";
 
   return reply;
+}
+
+function answerPartSearchResults(query, results) {
+  if (!results.length) {
+    return (
+      "I could not find that part in the current JARVIS parts inventory.\n\n" +
+      "Would you like me to add it to Jonathan's Purchase Order Request list?"
+    );
+  }
+
+  const top = results[0];
+  const confidence = getPartMatchConfidence(query, top);
+
+  if (confidence === "exact") {
+    return answerPartsRow(top);
+  }
+
+  if (confidence === "likely") {
+    return "I found a likely match:\n\n" + answerPartsRow(top);
+  }
+
+  return (
+    "I did not find an exact match for that part number.\n\n" +
+    "I found one possible loose match, but I am not confident it is the same part:\n\n" +
+    answerPartsRow(top) +
+    "\n\nIf this is not the item you meant, I should treat your original part number as not found."
+  );
 }
 
 function answerKnifeRow(top) {
@@ -947,7 +1015,7 @@ function answerFromTopResults(query, results) {
 
   if (top.type === "spreadsheet-row") {
     if (top.category === "03_INK_ROOM") return answerInkInventoryRow(top);
-    if (top.category === "01_PARTS_INVENTORY") return answerPartsRow(top);
+    if (top.category === "01_PARTS_INVENTORY") return answerPartSearchResults(query, results);
     if (top.category === "02_OPEN_ORDERS") return answerOpenOrderRow(top);
     if (top.category === "05_KNIVES") return answerKnifeRow(top);
     if (top.category === "07_MAGNA_REBUILDS") return answerMagnaRow(top);
@@ -974,10 +1042,11 @@ function answerPoRequest() {
   const form = findPdfByName("po_request_form") || findPdfByName("po request form");
 
   let reply =
-    "Here is the PO request process:\n\n" +
+    "Here is the PO / POR request process:\n\n" +
     "1. Fill out the PO Request Form.\n" +
     "2. Attach the quote that supports the price used on the form.\n" +
     "3. Email the completed form and quote to POR-Richmond@wearemoore.com.\n\n" +
+    "POR means Purchase Order Request / PO Request.\n\n" +
     "Important: JARVIS cannot approve purchases, create POs, or say something has been ordered unless the approved order records clearly confirm it.";
 
   if (form) {
@@ -998,7 +1067,7 @@ function answerPartOrderingProcess() {
     "- Requested due date\n" +
     "- Any useful notes\n\n" +
     "Important: this does not mean the part is ordered yet. Jonathan still needs to review it.\n\n" +
-    "If you are submitting the PO request yourself, fill out the PO Request Form, attach the quote that supports the price on the form, and email both to POR-Richmond@wearemoore.com."
+    "If you are submitting the PO / POR request yourself, fill out the PO Request Form, attach the quote that supports the price on the form, and email both to POR-Richmond@wearemoore.com."
   );
 }
 
@@ -1131,7 +1200,7 @@ function answerPartsLookup(query) {
     minScore: looksLikePartNumber(query) ? 55 : 80
   });
 
-  if (results.length) return answerFromTopResults(query, results);
+  if (results.length) return answerPartSearchResults(query, results);
 
   return (
     "I could not find that part in the current JARVIS parts inventory.\n\n" +
@@ -1150,7 +1219,7 @@ function answerOpenOrdersLookup(query) {
 
   return (
     "I could not find that item in the current sanitized open orders data.\n\n" +
-    "If this needs to be ordered, follow the PO request process: fill out the PO Request Form, attach the quote that supports the price, and email both to POR-Richmond@wearemoore.com."
+    "If this needs to be ordered, follow the PO / POR request process: fill out the PO Request Form, attach the quote that supports the price, and email both to POR-Richmond@wearemoore.com."
   );
 }
 
@@ -1213,6 +1282,18 @@ function isPurchaseOrderPolicyQuestion(msg) {
     msg.includes("por form") ||
     msg.includes("purchase order form") ||
     msg.includes("por-richmond") ||
+    msg.includes("po process") ||
+    msg.includes("por process") ||
+    msg.includes("request a po") ||
+    msg.includes("request a por") ||
+    msg.includes("submit a po") ||
+    msg.includes("submit a por") ||
+    msg.includes("create a po") ||
+    msg.includes("create a por") ||
+    msg.includes("get a po") ||
+    msg.includes("get a por") ||
+    msg.includes("how do i request a po") ||
+    msg.includes("how do i request a por") ||
     (
       msg.includes("request form") &&
       (
@@ -1255,6 +1336,107 @@ function isPartRequestStart(msg) {
   );
 }
 
+function isCancelIntent(msg) {
+  const q = lower(msg);
+  return (
+    q === "cancel" ||
+    q === "stop" ||
+    q === "never mind" ||
+    q === "nevermind" ||
+    q === "start over" ||
+    q === "new question" ||
+    q === "clear" ||
+    q === "reset"
+  );
+}
+
+function looksLikeDueDateOrUrgency(msg) {
+  const q = lower(msg);
+
+  if (
+    q.includes("asap") ||
+    q.includes("urgent") ||
+    q.includes("today") ||
+    q.includes("tomorrow") ||
+    q.includes("this week") ||
+    q.includes("next week") ||
+    q.includes("within 2 weeks") ||
+    q.includes("within two weeks") ||
+    q.includes("next monday") ||
+    q.includes("next tuesday") ||
+    q.includes("next wednesday") ||
+    q.includes("next thursday") ||
+    q.includes("next friday") ||
+    q.includes("next saturday") ||
+    q.includes("next sunday")
+  ) {
+    return true;
+  }
+
+  if (/\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b/.test(q)) return true;
+  if (/\b\d{4}-\d{2}-\d{2}\b/.test(q)) return true;
+
+  return false;
+}
+
+function looksLikeMachineOrArea(msg) {
+  const q = lower(msg);
+
+  if (/\b(102|202|627-1|627-2|627-3|6271|6272|6273)\b/.test(q)) return true;
+
+  return (
+    q.includes("wh1") ||
+    q.includes("wh2") ||
+    q.includes("wh3") ||
+    q.includes("wh4") ||
+    q.includes("warehouse") ||
+    q.includes("ink room") ||
+    q.includes("ink department") ||
+    q.includes("maintenance") ||
+    q.includes("prepress") ||
+    q.includes("pre-press") ||
+    q.includes("mailshop") ||
+    q.includes("shipping") ||
+    q.includes("receiving") ||
+    q.includes("safety") ||
+    q.includes("office") ||
+    q.includes("hvac") ||
+    q.includes("envelope")
+  );
+}
+
+function looksLikeNewQuestion(msg) {
+  const q = lower(msg);
+
+  if (q.includes("?")) return true;
+
+  if (
+    q.startsWith("where ") ||
+    q.startsWith("what ") ||
+    q.startsWith("who ") ||
+    q.startsWith("when ") ||
+    q.startsWith("how ") ||
+    q.startsWith("do we ") ||
+    q.startsWith("did ") ||
+    q.startsWith("does ") ||
+    q.startsWith("can ") ||
+    q.startsWith("i need ink") ||
+    q.startsWith("need ink") ||
+    q.startsWith("do we have ink") ||
+    q.startsWith("where is ink") ||
+    q.startsWith("how do i request") ||
+    q.startsWith("request a po") ||
+    q.startsWith("request a por")
+  ) {
+    return true;
+  }
+
+  if (isPurchaseOrderPolicyQuestion(q)) return true;
+  if (q.includes("ink") || q.includes("thermostat") || q.includes("eyewash") || q.includes("fire extinguisher")) return true;
+
+  return false;
+}
+
 function classifyIntent(msg) {
   const q = lower(msg);
 
@@ -1262,6 +1444,10 @@ function classifyIntent(msg) {
 
   if (isPurchaseOrderPolicyQuestion(q)) return "po_policy";
   if (isPartOrderingProcessQuestion(q)) return "part_ordering_process";
+
+  if (q.includes("ink") || q.includes("pantone") || q.includes("pms") || q.includes("drawdown") || q.includes("extender") || q.includes("inx")) {
+    return "ink";
+  }
 
   if (isPartRequestStart(q)) return "part_request_start";
 
@@ -1271,10 +1457,6 @@ function classifyIntent(msg) {
 
   if (q.includes("thermostat") || q.includes("eyewash") || q.includes("eye wash") || q.includes("fire extinguisher") || q.includes("extinguisher") || q.includes("map")) {
     return "map";
-  }
-
-  if (q.includes("ink") || q.includes("pantone") || q.includes("pms") || q.includes("drawdown") || q.includes("extender") || q.includes("inx")) {
-    return "ink";
   }
 
   if (q.includes("did") && (q.includes("order") || q.includes("ordered"))) return "open_orders";
@@ -1409,20 +1591,55 @@ async function writePartsRequestToSheet(request) {
 }
 
 async function handlePendingRequest({ pending, from, cleanBody, requesterName }) {
+  const msg = lower(cleanBody);
+
+  if (isCancelIntent(msg)) {
+    pendingRequests.delete(from);
+    return "Okay — I canceled the pending parts request. What can I help you with?";
+  }
+
   if (requesterName) pending.requesterName = requesterName;
 
   if (pending.step === "awaiting_due_date") {
-    pending.requestedDueDate = cleanBody;
-    pending.step = "awaiting_machine";
-    pendingRequests.set(from, pending);
+    if (looksLikeDueDateOrUrgency(cleanBody)) {
+      pending.requestedDueDate = cleanBody;
+      pending.step = "awaiting_machine";
+      pendingRequests.set(from, pending);
+
+      return (
+        "Got it. What machine or area is this part for?\n\n" +
+        "Examples: 102, 202, 627-1, 627-2, 627-3, Ink Room, WH2, HVAC."
+      );
+    }
+
+    if (looksLikeNewQuestion(cleanBody)) {
+      pendingRequests.delete(from);
+      const reply = await getJarvisReply({ from, body: cleanBody, requesterName });
+      return "I paused the pending parts request and answered your new question instead.\n\n" + reply;
+    }
 
     return (
-      "Got it. What machine or area is this part for?\n\n" +
-      "Examples: 102, 202, 627-1, 627-2, 627-3, Ink Room, WH2, HVAC."
+      "I am waiting for the requested due date for the pending part request.\n\n" +
+      "Reply with something like 6/20, next Friday, ASAP, today, tomorrow, or within 2 weeks.\n\n" +
+      "Or type cancel to stop this request."
     );
   }
 
   if (pending.step === "awaiting_machine") {
+    if (looksLikeNewQuestion(cleanBody)) {
+      pendingRequests.delete(from);
+      const reply = await getJarvisReply({ from, body: cleanBody, requesterName });
+      return "I paused the pending parts request and answered your new question instead.\n\n" + reply;
+    }
+
+    if (!looksLikeMachineOrArea(cleanBody)) {
+      return (
+        "I am waiting for the machine or area for the pending part request.\n\n" +
+        "Examples: 102, 202, 627-1, 627-2, 627-3, Ink Room, WH2, Maintenance, Shipping, or HVAC.\n\n" +
+        "Or type cancel to stop this request."
+      );
+    }
+
     pending.machineOrArea = cleanBody;
 
     const priority = isHighPriorityDueDate(pending.requestedDueDate) ? "High" : "Normal";
@@ -1506,16 +1723,25 @@ async function startPartRequest({ from, cleanBody, requesterName }) {
   const lookupResults = searchKnowledge(info.partNumber || cleanBody, {
     maxResults: 3,
     categories: ["01_PARTS_INVENTORY"],
-    minScore: 80
+    minScore: 55
   });
 
   let foundNote = "";
 
   if (lookupResults.length) {
-    foundNote =
-      "Before I add the request, I found this possible inventory match:\n\n" +
-      answerFromTopResults(info.partNumber || cleanBody, lookupResults) +
-      "\n\n";
+    const confidence = getPartMatchConfidence(info.partNumber || cleanBody, lookupResults[0]);
+
+    if (confidence === "exact" || confidence === "likely") {
+      foundNote =
+        "Before I add the request, it looks like we may already have this:\n\n" +
+        answerPartSearchResults(info.partNumber || cleanBody, lookupResults) +
+        "\n\n";
+    } else {
+      foundNote =
+        "Before I add the request, I found one loose possible match, but I am not confident it is the same part:\n\n" +
+        answerPartSearchResults(info.partNumber || cleanBody, lookupResults) +
+        "\n\n";
+    }
   }
 
   pendingRequests.set(from, {
@@ -1534,7 +1760,8 @@ async function startPartRequest({ from, cleanBody, requesterName }) {
     "Part Number: " + (info.partNumber || "Not provided") + "\n" +
     "Description: " + (info.partDescription || "Not provided") + "\n\n" +
     "What requested due date should I use?\n\n" +
-    "Examples: 6/20, next Friday, ASAP, or within 2 weeks."
+    "Examples: 6/20, next Friday, ASAP, or within 2 weeks.\n\n" +
+    "Type cancel if you do not want to create this request."
   );
 }
 
@@ -1558,7 +1785,7 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
     case "help":
       return (
         "What can I help you with?\n\n" +
-        "You can ask about parts, ink, HVAC/thermostats, maps, knives, PO requests, Magna rebuilds, Warehouse 4 mailshop equipment, safety training, or the 2-2-3 schedule.\n\n" +
+        "You can ask about parts, ink, HVAC/thermostats, maps, knives, PO/POR requests, Magna rebuilds, Warehouse 4 mailshop equipment, safety training, or the 2-2-3 schedule.\n\n" +
         `Knowledge base records loaded: ${knowledgeRecords.length}.`
       );
 
