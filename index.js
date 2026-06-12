@@ -58,7 +58,7 @@ const CATEGORY_HINTS = [
   },
   {
     category: "06_PURCHASING_PO_REQUESTS",
-    terms: ["po request", "purchase order request", "blank po", "po form", "por-richmond"]
+    terms: ["po request", "por request", "purchase order request", "blank po", "po form", "por form", "por-richmond"]
   },
   {
     category: "07_MAGNA_REBUILDS",
@@ -81,6 +81,48 @@ const CATEGORY_HINTS = [
     terms: ["2-2-3", "schedule", "dayshift", "day shift", "nightshift", "night shift", "calendar"]
   }
 ];
+
+const SEARCH_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "by",
+  "can",
+  "could",
+  "do",
+  "does",
+  "for",
+  "from",
+  "have",
+  "how",
+  "i",
+  "in",
+  "is",
+  "it",
+  "me",
+  "need",
+  "of",
+  "on",
+  "or",
+  "our",
+  "please",
+  "send",
+  "the",
+  "there",
+  "this",
+  "to",
+  "we",
+  "what",
+  "when",
+  "where",
+  "who",
+  "with",
+  "you"
+]);
 
 function normalize(text) {
   return (text || "").toString().trim();
@@ -375,7 +417,7 @@ function categoriesForQuery(query) {
     categories.add("03_INK_ROOM");
   }
 
-  if (q.includes("po") || q.includes("ordered") || q.includes("order")) {
+  if (q.includes("po") || q.includes("por") || q.includes("ordered") || q.includes("order")) {
     categories.add("02_OPEN_ORDERS");
     categories.add("06_PURCHASING_PO_REQUESTS");
   }
@@ -400,7 +442,10 @@ function categoryBoost(query, category) {
 
 function scoreRecord(record, query) {
   const qLoose = normalizeLoose(query);
-  const terms = qLoose.split(" ").filter((term) => term.length >= 2);
+  const terms = qLoose
+    .split(" ")
+    .filter((term) => term.length >= 2 && !SEARCH_STOPWORDS.has(term));
+
   const queryKeys = extractSearchKeys(query);
   const queryDigits = [...new Set(queryKeys.map((key) => digitsOnly(key)).filter((key) => key.length >= 3))];
 
@@ -472,6 +517,7 @@ function searchKnowledge(query, options = {}) {
   const maxResults = options.maxResults || 5;
   const preferredCategories = options.categories || categoriesForQuery(query);
   const includeGuidance = options.includeGuidance || false;
+  const minScore = options.minScore ?? 25;
 
   let records = knowledgeRecords;
 
@@ -493,7 +539,7 @@ function searchKnowledge(query, options = {}) {
     .filter((record) => record.score > 0)
     .sort((a, b) => b.score - a.score);
 
-  return scored.slice(0, maxResults);
+  return scored.filter((record) => record.score >= minScore).slice(0, maxResults);
 }
 
 function getField(fields, names) {
@@ -536,7 +582,10 @@ function makeExcerpt(body, query, maxLen = 700) {
   const text = normalize(body).replace(/\s+/g, " ");
   if (text.length <= maxLen) return text;
 
-  const qTerms = normalizeLoose(query).split(" ").filter((term) => term.length > 3);
+  const qTerms = normalizeLoose(query)
+    .split(" ")
+    .filter((term) => term.length > 3 && !SEARCH_STOPWORDS.has(term));
+
   const lowerText = text.toLowerCase();
 
   let idx = -1;
@@ -857,14 +906,18 @@ function answerFromTopResults(query, results) {
 function answerPoRequest() {
   const form = findPdfByName("po_request_form") || findPdfByName("po request form");
 
-  return (
-    "To request a PO:\n\n" +
+  let reply =
+    "Here is the PO request process:\n\n" +
     "1. Fill out the PO Request Form.\n" +
-    "2. Attach the quote that supports the price used on the PO Request Form.\n" +
+    "2. Attach the quote that supports the price used on the form.\n" +
     "3. Email the completed form and quote to POR-Richmond@wearemoore.com.\n\n" +
-    "Important: JARVIS cannot approve purchases, create POs, or say something has been ordered unless the approved order records clearly confirm it." +
-    (form ? linkLine(form) : "")
-  );
+    "Important: JARVIS cannot approve purchases, create POs, or say something has been ordered unless the approved order records clearly confirm it.";
+
+  if (form) {
+    reply += "\n\nBlank PO Request Form:\n" + form.url;
+  }
+
+  return reply;
 }
 
 function answerPartOrderingProcess() {
@@ -970,7 +1023,8 @@ function answerInkQuestion(query) {
 
   const results = searchKnowledge(query, {
     maxResults: 8,
-    categories: ["03_INK_ROOM"]
+    categories: ["03_INK_ROOM"],
+    minScore: 25
   });
 
   const spreadsheetResults = results.filter((record) => record.type === "spreadsheet-row");
@@ -992,7 +1046,8 @@ function answerInkQuestion(query) {
   const guidanceResults = searchKnowledge(query, {
     maxResults: 3,
     categories: ["03_INK_ROOM"],
-    includeGuidance: true
+    includeGuidance: true,
+    minScore: 25
   });
 
   if (guidanceResults.length) {
@@ -1005,7 +1060,8 @@ function answerInkQuestion(query) {
 function answerPartsLookup(query) {
   const results = searchKnowledge(query, {
     maxResults: 6,
-    categories: ["01_PARTS_INVENTORY"]
+    categories: ["01_PARTS_INVENTORY"],
+    minScore: 80
   });
 
   if (results.length) return answerFromTopResults(query, results);
@@ -1019,7 +1075,8 @@ function answerPartsLookup(query) {
 function answerOpenOrdersLookup(query) {
   const results = searchKnowledge(query, {
     maxResults: 6,
-    categories: ["02_OPEN_ORDERS"]
+    categories: ["02_OPEN_ORDERS"],
+    minScore: 35
   });
 
   if (results.length) return answerFromTopResults(query, results);
@@ -1033,7 +1090,8 @@ function answerOpenOrdersLookup(query) {
 function answerKnifeLookup(query) {
   const results = searchKnowledge(query, {
     maxResults: 6,
-    categories: ["05_KNIVES"]
+    categories: ["05_KNIVES"],
+    minScore: 50
   });
 
   if (results.length) return answerFromTopResults(query, results);
@@ -1044,7 +1102,8 @@ function answerKnifeLookup(query) {
 function answerMagnaLookup(query) {
   const results = searchKnowledge(query, {
     maxResults: 6,
-    categories: ["07_MAGNA_REBUILDS"]
+    categories: ["07_MAGNA_REBUILDS"],
+    minScore: 35
   });
 
   if (results.length) return answerFromTopResults(query, results);
@@ -1055,7 +1114,8 @@ function answerMagnaLookup(query) {
 function answerMailshopLookup(query) {
   const results = searchKnowledge(query, {
     maxResults: 6,
-    categories: ["08_MAILSHOP_EQUIPMENT_OUTGOING"]
+    categories: ["08_MAILSHOP_EQUIPMENT_OUTGOING"],
+    minScore: 35
   });
 
   if (results.length) return answerFromTopResults(query, results);
@@ -1066,7 +1126,8 @@ function answerMailshopLookup(query) {
 function answerSafetyLookup(query) {
   const results = searchKnowledge(query, {
     maxResults: 6,
-    categories: ["10_SAFETY_TRAINING"]
+    categories: ["10_SAFETY_TRAINING"],
+    minScore: 35
   });
 
   if (results.length) return answerFromTopResults(query, results);
@@ -1077,11 +1138,22 @@ function answerSafetyLookup(query) {
 function isPurchaseOrderPolicyQuestion(msg) {
   return (
     msg.includes("po request") ||
+    msg.includes("por request") ||
     msg.includes("purchase order request") ||
     msg.includes("blank po") ||
+    msg.includes("blank por") ||
     msg.includes("po form") ||
+    msg.includes("por form") ||
     msg.includes("purchase order form") ||
-    msg.includes("por-richmond")
+    msg.includes("por-richmond") ||
+    (
+      msg.includes("request form") &&
+      (
+        msg.includes("po") ||
+        msg.includes("por") ||
+        msg.includes("purchase")
+      )
+    )
   );
 }
 
@@ -1360,7 +1432,8 @@ async function startPartRequest({ from, cleanBody, requesterName }) {
 
   const lookupResults = searchKnowledge(info.partNumber || cleanBody, {
     maxResults: 3,
-    categories: ["01_PARTS_INVENTORY"]
+    categories: ["01_PARTS_INVENTORY"],
+    minScore: 80
   });
 
   let foundNote = "";
@@ -1453,7 +1526,7 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
       return answerPartsLookup(cleanBody);
 
     default: {
-      const results = searchKnowledge(cleanBody, { maxResults: 5 });
+      const results = searchKnowledge(cleanBody, { maxResults: 5, minScore: 50 });
       if (results.length) return answerFromTopResults(cleanBody, results);
 
       return (
