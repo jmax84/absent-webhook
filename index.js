@@ -17,15 +17,16 @@ app.use(express.json({ limit: "2mb" }));
 
 const DATA_ROOT = path.join(__dirname, "data", "JARVIS_DATA_FINAL_2026-06-XX");
 const pendingRequests = new Map();
+
 let knowledgeRecords = [];
 let knowledgeLoadedAt = null;
 let knowledgeLoadError = null;
 
 const SENSITIVE_FIELD_PATTERNS = [
   /cost/i,
-  /price/i,
   /unit\s*price/i,
-  /total/i,
+  /total\s*price/i,
+  /price/i,
   /amount/i,
   /margin/i,
   /markup/i,
@@ -34,9 +35,9 @@ const SENSITIVE_FIELD_PATTERNS = [
 ];
 
 const CATEGORY_HINTS = [
-  { category: "01_PARTS_INVENTORY", terms: ["part", "parts", "bearing", "bin", "inventory", "stock", "do we have", "where is"] },
+  { category: "01_PARTS_INVENTORY", terms: ["part", "parts", "bearing", "bin", "inventory", "stock", "do we have", "on hand", "available"] },
   { category: "02_OPEN_ORDERS", terms: ["ordered", "order", "po", "purchase", "delivery", "received", "vendor", "open order"] },
-  { category: "03_INK_ROOM", terms: ["ink", "pantone", "pms", "formula", "drawdown", "extender", "inx", "anilox", "waste tote"] },
+  { category: "03_INK_ROOM", terms: ["ink", "pantone", "pms", "formula", "drawdown", "extender", "inx", "anilox", "waste tote", "color"] },
   { category: "04_HVAC_AND_BUILDING", terms: ["hvac", "ac", "air conditioning", "thermostat", "cooling", "heat", "pre-press", "prepress"] },
   { category: "05_KNIVES", terms: ["knife", "knives", "cutoff", "cut-off", "profile", "sharpen", "sharpening"] },
   { category: "06_PURCHASING_PO_REQUESTS", terms: ["po request", "purchase order request", "blank po", "po form", "por-richmond"] },
@@ -73,28 +74,24 @@ function digitsOnly(text) {
   return normalize(text).replace(/\D/g, "");
 }
 
-function escapeHtml(text) {
-  return normalize(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+function isSensitiveField(fieldName) {
+  return SENSITIVE_FIELD_PATTERNS.some((pattern) => pattern.test(fieldName || ""));
+}
+
+function getFileType(filePath) {
+  return path.extname(filePath).toLowerCase().replace(".", "");
 }
 
 function walkFiles(dir) {
   if (!fs.existsSync(dir)) return [];
 
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
   const files = [];
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
 
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...walkFiles(fullPath));
-    } else {
-      files.push(fullPath);
-    }
+    if (entry.isDirectory()) files.push(...walkFiles(fullPath));
+    else files.push(fullPath);
   }
 
   return files;
@@ -116,55 +113,44 @@ function titleFromFile(filePath) {
   return path.basename(filePath).replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
 }
 
-function isSensitiveField(fieldName) {
-  return SENSITIVE_FIELD_PATTERNS.some((pattern) => pattern.test(fieldName || ""));
-}
+function extractSearchKeys(text) {
+  const keys = new Set();
+  const rawTokens = normalize(text).match(/[A-Za-z0-9][A-Za-z0-9._\-/]{1,}[A-Za-z0-9]/g) || [];
 
-function getFileType(filePath) {
-  return path.extname(filePath).toLowerCase().replace(".", "");
+  for (const token of rawTokens) {
+    const part = normalizePart(token);
+    if (part.length >= 3 && /\d/.test(part)) keys.add(part);
+
+    const digits = digitsOnly(token);
+    if (digits.length >= 3) keys.add(digits);
+  }
+
+  return [...keys];
 }
 
 function recordSearchText(record) {
   const pieces = [record.title, record.category, record.sourceFile, record.body, record.sheetName];
+
   if (record.fields) {
     for (const [key, value] of Object.entries(record.fields)) {
       if (isSensitiveField(key)) continue;
       pieces.push(key, value);
     }
   }
+
   return pieces.filter(Boolean).join(" ");
-}
-
-function extractPartLikeKeys(text) {
-  const keys = new Set();
-  const rawTokens = normalize(text).match(/[A-Za-z0-9][A-Za-z0-9._\-/]{1,}[A-Za-z0-9]/g) || [];
-
-  for (const token of rawTokens) {
-    const normalized = normalizePart(token);
-    if (normalized.length >= 3 && /\d/.test(normalized)) {
-      keys.add(normalized);
-    }
-    const digits = digitsOnly(token);
-    if (digits.length >= 4) {
-      keys.add(digits);
-    }
-  }
-
-  return [...keys];
 }
 
 function addKnowledgeRecord(record) {
   const text = recordSearchText(record);
   const normalizedText = normalizeLoose(text);
-  const partKeys = new Set(extractPartLikeKeys(text));
+  const searchKeys = new Set(extractSearchKeys(text));
 
   if (record.fields) {
     for (const [key, value] of Object.entries(record.fields)) {
       const k = lower(key);
       if (/(part|item|number|model|serial|quote|knife|color|pantone|pms|machine|id)/.test(k)) {
-        for (const partKey of extractPartLikeKeys(value)) {
-          partKeys.add(partKey);
-        }
+        for (const searchKey of extractSearchKeys(value)) searchKeys.add(searchKey);
       }
     }
   }
@@ -172,7 +158,7 @@ function addKnowledgeRecord(record) {
   knowledgeRecords.push({
     ...record,
     normalizedText,
-    partKeys: [...partKeys]
+    searchKeys: [...searchKeys]
   });
 }
 
@@ -203,6 +189,7 @@ function loadWorkbookFile(filePath) {
 
     rows.forEach((row, index) => {
       const fields = {};
+
       for (const [key, value] of Object.entries(row)) {
         const cleanKey = normalize(key);
         const cleanValue = cleanCellValue(value);
@@ -250,14 +237,11 @@ function loadKnowledgeBase() {
       if (rel.startsWith("99_DO_NOT_USE_YET/")) continue;
 
       const ext = getFileType(filePath);
+
       try {
-        if (["md", "txt"].includes(ext)) {
-          loadMarkdownFile(filePath);
-        } else if (["xlsx", "xls"].includes(ext)) {
-          loadWorkbookFile(filePath);
-        } else if (ext === "pdf") {
-          loadPdfFile(filePath);
-        }
+        if (["md", "txt"].includes(ext)) loadMarkdownFile(filePath);
+        else if (["xlsx", "xls"].includes(ext)) loadWorkbookFile(filePath);
+        else if (ext === "pdf") loadPdfFile(filePath);
       } catch (error) {
         console.error(`Failed to load ${rel}:`, error);
         addKnowledgeRecord({
@@ -302,7 +286,31 @@ function levenshtein(a, b) {
   return matrix[a.length][b.length];
 }
 
-function getCategoryBoost(query, category) {
+function categoriesForQuery(query) {
+  const q = lower(query);
+  const categories = new Set();
+
+  for (const hint of CATEGORY_HINTS) {
+    if (hint.terms.some((term) => q.includes(term))) categories.add(hint.category);
+  }
+
+  if (q.includes("where") || q.includes("thermostat") || q.includes("eyewash") || q.includes("fire extinguisher")) {
+    categories.add("09_MAPS");
+  }
+
+  if (q.includes("ink") || q.includes("pms") || q.includes("pantone")) {
+    categories.add("03_INK_ROOM");
+  }
+
+  if (q.includes("po") || q.includes("ordered") || q.includes("order")) {
+    categories.add("02_OPEN_ORDERS");
+    categories.add("06_PURCHASING_PO_REQUESTS");
+  }
+
+  return [...categories];
+}
+
+function categoryBoost(query, category) {
   const q = lower(query);
   let boost = 0;
 
@@ -318,12 +326,12 @@ function getCategoryBoost(query, category) {
 
 function scoreRecord(record, query) {
   const qLoose = normalizeLoose(query);
-  const qLower = lower(query);
   const terms = qLoose.split(" ").filter((term) => term.length >= 2);
-  const qPart = normalizePart(query);
-  const qDigits = digitsOnly(query);
-  let score = getCategoryBoost(query, record.category);
-  let reason = [];
+  const queryKeys = extractSearchKeys(query);
+  const queryDigits = [...new Set(queryKeys.map((key) => digitsOnly(key)).filter((key) => key.length >= 3))];
+
+  let score = categoryBoost(query, record.category);
+  const reason = [];
 
   if (!qLoose) return { score: 0, reason };
 
@@ -336,60 +344,61 @@ function scoreRecord(record, query) {
   for (const term of terms) {
     if (record.normalizedText.includes(term)) matchedTerms += 1;
   }
+
   if (matchedTerms > 0) {
     score += matchedTerms * 8;
     if (matchedTerms === terms.length) score += 20;
     reason.push(`${matchedTerms} term match`);
   }
 
-  if (qPart.length >= 3) {
-    for (const key of record.partKeys || []) {
-      if (key === qPart) {
+  for (const queryKey of queryKeys) {
+    for (const recordKey of record.searchKeys || []) {
+      if (recordKey === queryKey) {
         score += 120;
-        reason.push("exact normalized part match");
-      } else if (key.includes(qPart) || qPart.includes(key)) {
-        const shorter = Math.min(key.length, qPart.length);
-        if (shorter >= 4) {
-          score += 65;
-          reason.push("partial part match");
-        }
-      } else {
-        const maxLen = Math.max(key.length, qPart.length);
-        if (maxLen >= 4) {
-          const distance = levenshtein(key, qPart);
-          const limit = maxLen <= 6 ? 1 : 2;
-          if (distance <= limit) {
-            score += 45;
-            reason.push("fuzzy part match");
-          }
+        reason.push("exact normalized key match");
+      } else if (queryKey.length >= 4 && (recordKey.includes(queryKey) || queryKey.includes(recordKey))) {
+        score += 60;
+        reason.push("partial key match");
+      } else if (queryKey.length >= 4 && recordKey.length >= 4) {
+        const maxLen = Math.max(queryKey.length, recordKey.length);
+        const distance = levenshtein(recordKey, queryKey);
+        const limit = maxLen <= 6 ? 1 : 2;
+        if (distance <= limit) {
+          score += 40;
+          reason.push("fuzzy key match");
         }
       }
     }
   }
 
-  if (qDigits.length >= 4) {
-    for (const key of record.partKeys || []) {
-      const keyDigits = digitsOnly(key);
-      if (keyDigits === qDigits) {
+  for (const queryDigit of queryDigits) {
+    for (const recordKey of record.searchKeys || []) {
+      const recordDigits = digitsOnly(recordKey);
+      if (recordDigits === queryDigit) {
         score += 90;
         reason.push("digits-only match");
-      } else if (keyDigits.includes(qDigits) || qDigits.includes(keyDigits)) {
-        score += 45;
+      } else if (queryDigit.length >= 4 && (recordDigits.includes(queryDigit) || queryDigit.includes(recordDigits))) {
+        score += 40;
         reason.push("partial digits match");
       }
     }
   }
 
-  if (record.type === "spreadsheet-row") {
-    score += 5;
-  }
-
+  if (record.type === "spreadsheet-row") score += 5;
   return { score, reason };
 }
 
 function searchKnowledge(query, options = {}) {
   const maxResults = options.maxResults || 5;
-  const scored = knowledgeRecords
+  const preferredCategories = options.categories || categoriesForQuery(query);
+
+  let records = knowledgeRecords;
+  if (preferredCategories.length) {
+    const preferred = knowledgeRecords.filter((record) => preferredCategories.includes(record.category));
+    if (preferred.length) records = preferred;
+  }
+
+  const scored = records
     .map((record) => {
       const result = scoreRecord(record, query);
       return { ...record, score: result.score, reason: result.reason };
@@ -403,28 +412,23 @@ function searchKnowledge(query, options = {}) {
 function safeFields(fields) {
   const entries = Object.entries(fields || {})
     .filter(([key, value]) => !isSensitiveField(key) && normalize(value) !== "")
-    .slice(0, 10);
+    .slice(0, 12);
+
   return Object.fromEntries(entries);
 }
 
 function formatFields(fields) {
   const safe = safeFields(fields);
-  const lines = [];
-
-  for (const [key, value] of Object.entries(safe)) {
-    lines.push(`${key}: ${value}`);
-  }
-
-  return lines.join("\n");
+  return Object.entries(safe).map(([key, value]) => `${key}: ${value}`).join("\n");
 }
 
-function makeExcerpt(body, query, maxLen = 700) {
+function makeExcerpt(body, query, maxLen = 800) {
   const text = normalize(body).replace(/\s+/g, " ");
   if (text.length <= maxLen) return text;
 
   const qTerms = normalizeLoose(query).split(" ").filter((term) => term.length > 3);
-  let idx = -1;
   const lowerText = text.toLowerCase();
+  let idx = -1;
 
   for (const term of qTerms) {
     idx = lowerText.indexOf(term);
@@ -450,6 +454,7 @@ function linkLine(record) {
 
 function answerPoRequest() {
   const form = findPdfByName("po_request_form") || findPdfByName("po request form");
+
   return (
     "To request a PO:\n\n" +
     "1. Fill out the PO Request Form.\n" +
@@ -475,16 +480,22 @@ function answerFromTopResults(query, results) {
     if (top.sheetName) reply += `, sheet ${top.sheetName}`;
     reply += ":\n\n" + formatFields(top.fields);
 
-    if (top.category.includes("PARTS") || top.category.includes("KNIVES") || top.category.includes("MAILSHOP") || top.category.includes("INK")) {
+    if (
+      top.category.includes("PARTS") ||
+      top.category.includes("KNIVES") ||
+      top.category.includes("MAILSHOP") ||
+      top.category.includes("INK")
+    ) {
       reply += "\n\nPlease physically verify before relying on this for production.";
     }
 
-    if (results.length > 1 && results[1].score >= top.score - 25) {
+    const closeMatches = results.slice(1).filter((result) => result.score >= top.score - 25).slice(0, 3);
+    if (closeMatches.length) {
       reply += "\n\nOther possible matches:";
-      for (const result of results.slice(1, 4)) {
+      for (const result of closeMatches) {
         if (result.type === "spreadsheet-row") {
           const safe = safeFields(result.fields);
-          const preview = Object.entries(safe).slice(0, 4).map(([k, v]) => `${k}: ${v}`).join(" | ");
+          const preview = Object.entries(safe).slice(0, 5).map(([k, v]) => `${k}: ${v}`).join(" | ");
           reply += `\n- ${preview}`;
         } else {
           reply += `\n- ${result.title} (${result.sourceFile})`;
@@ -504,11 +515,7 @@ function answerFromTopResults(query, results) {
     );
   }
 
-  return (
-    `I found this in ${top.sourceFile}:\n\n` +
-    makeExcerpt(top.body, query) +
-    linkLine(top)
-  );
+  return `I found this in ${top.sourceFile}:\n\n${makeExcerpt(top.body, query)}${linkLine(top)}`;
 }
 
 function extractSimplePartInfo(text) {
@@ -521,17 +528,8 @@ function extractSimplePartInfo(text) {
 
   const match = cleaned.match(/^([A-Za-z0-9\-_.\/]+)\s*(.*)$/);
 
-  if (!match) {
-    return {
-      partNumber: "",
-      partDescription: cleaned || text
-    };
-  }
-
-  return {
-    partNumber: match[1] || "",
-    partDescription: match[2] || ""
-  };
+  if (!match) return { partNumber: "", partDescription: cleaned || text };
+  return { partNumber: match[1] || "", partDescription: match[2] || "" };
 }
 
 function isHighPriorityDueDate(dueDateText) {
@@ -646,7 +644,7 @@ function isPurchaseOrderPolicyQuestion(msg) {
   );
 }
 
-function isDirectInventoryLookup(msg) {
+function isDirectLookup(msg) {
   return (
     msg.includes("do we have") ||
     msg.includes("where is") ||
@@ -781,9 +779,10 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
     msg.startsWith("add part")
   ) {
     const info = extractSimplePartInfo(cleanBody);
-
-    const lookupResults = searchKnowledge(info.partNumber || cleanBody, { maxResults: 3 })
-      .filter((record) => record.category.includes("PARTS"));
+    const lookupResults = searchKnowledge(info.partNumber || cleanBody, {
+      maxResults: 3,
+      categories: ["01_PARTS_INVENTORY"]
+    });
 
     let foundNote = "";
     if (lookupResults.length) {
@@ -810,15 +809,8 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
     );
   }
 
-  if (isDirectInventoryLookup(msg)) {
-    const results = searchKnowledge(cleanBody, { maxResults: 6 });
-    return answerFromTopResults(cleanBody, results);
-  }
-
-  const results = searchKnowledge(cleanBody, { maxResults: 5 });
-  if (results.length) {
-    return answerFromTopResults(cleanBody, results);
-  }
+  const results = searchKnowledge(cleanBody, { maxResults: isDirectLookup(msg) ? 6 : 5 });
+  if (results.length) return answerFromTopResults(cleanBody, results);
 
   return (
     "I received your question:\n\n" +
@@ -849,7 +841,6 @@ function getAskPageHtml() {
     .user-wrap { justify-content:flex-end; }
     .jarvis-wrap { justify-content:flex-start; }
     .bubble { max-width:82%; white-space:pre-wrap; line-height:1.42; border-radius:18px; padding:12px 14px; font-size:16px; box-shadow:0 1px 4px rgba(15,23,42,.06); }
-    .bubble a { color:inherit; text-decoration:underline; }
     .user { background:var(--blue); color:white; border-bottom-right-radius:6px; }
     .jarvis { background:white; border:1px solid var(--border); border-bottom-left-radius:6px; }
     .system { background:var(--green); border:1px solid var(--green-border); border-bottom-left-radius:6px; }
@@ -891,48 +882,80 @@ function getAskPageHtml() {
       }
       return id;
     }
-    function scrollChatToBottom() { const chat = document.getElementById("chat"); chat.scrollTop = chat.scrollHeight; }
-    function linkify(text) {
-      const escaped = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-      return escaped.replace(/(\/kb\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+
+    function scrollChatToBottom() {
+      const chat = document.getElementById("chat");
+      chat.scrollTop = chat.scrollHeight;
     }
+
     function addMessage(text, type) {
       const chat = document.getElementById("chat");
       const wrap = document.createElement("div");
       wrap.className = "bubble-wrap " + (type === "user" ? "user-wrap" : "jarvis-wrap");
+
       const bubble = document.createElement("div");
       bubble.className = "bubble " + type;
-      bubble.innerHTML = linkify(text);
+      bubble.textContent = String(text);
+
       wrap.appendChild(bubble);
       chat.appendChild(wrap);
       scrollChatToBottom();
     }
+
     async function askJarvis() {
       const nameInput = document.getElementById("name");
       const questionInput = document.getElementById("question");
       const button = document.getElementById("askButton");
+
       const name = nameInput.value.trim();
       const question = questionInput.value.trim();
-      if (!question) { questionInput.focus(); return; }
+
+      if (!question) {
+        questionInput.focus();
+        return;
+      }
+
       localStorage.setItem("jarvisName", name);
-      button.disabled = true; button.textContent = "...";
-      addMessage(question, "user"); questionInput.value = "";
+      button.disabled = true;
+      button.textContent = "...";
+
+      addMessage(question, "user");
+      questionInput.value = "";
+
       try {
-        const response = await fetch("/api/ask", { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ sessionId:getSessionId(), name, question }) });
+        const response = await fetch("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: getSessionId(), name, question })
+        });
+
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Request failed");
+
         addMessage(data.reply, "jarvis");
       } catch (error) {
-        addMessage("I had a problem answering that. Jonathan needs to check the JARVIS logs.\\n\\nError: " + error.message, "system");
+        addMessage("I had a problem answering that. Jonathan needs to check the JARVIS logs.\n\nError: " + error.message, "system");
       } finally {
-        button.disabled = false; button.textContent = "Ask"; questionInput.focus(); scrollChatToBottom();
+        button.disabled = false;
+        button.textContent = "Ask";
+        questionInput.focus();
+        scrollChatToBottom();
       }
     }
+
     document.addEventListener("DOMContentLoaded", () => {
       const savedName = localStorage.getItem("jarvisName");
       if (savedName) document.getElementById("name").value = savedName;
+
       addMessage("What can I help you with?", "system");
-      document.getElementById("question").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); askJarvis(); } });
+
+      document.getElementById("question").addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          askJarvis();
+        }
+      });
+
       document.getElementById("question").focus();
     });
   </script>
@@ -964,7 +987,14 @@ app.get("/kb-status", (_req, res) => {
   for (const record of knowledgeRecords) {
     counts[record.category] = (counts[record.category] || 0) + 1;
   }
-  res.json({ ok: !knowledgeLoadError, recordsLoaded: knowledgeRecords.length, loadedAt: knowledgeLoadedAt, counts, error: knowledgeLoadError ? knowledgeLoadError.toString() : null });
+
+  res.json({
+    ok: !knowledgeLoadError,
+    recordsLoaded: knowledgeRecords.length,
+    loadedAt: knowledgeLoadedAt,
+    counts,
+    error: knowledgeLoadError ? knowledgeLoadError.toString() : null
+  });
 });
 
 app.get("/reload-kb", (_req, res) => {
