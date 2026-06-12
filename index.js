@@ -934,7 +934,7 @@ function getAskPageHtml() {
 
         addMessage(data.reply, "jarvis");
       } catch (error) {
-        addMessage("I had a problem answering that. Jonathan needs to check the JARVIS logs.\n\nError: " + error.message, "system");
+                addMessage("I had a problem answering that. Jonathan needs to check the JARVIS logs. Error: " + error.message, "system");
       } finally {
         button.disabled = false;
         button.textContent = "Ask";
