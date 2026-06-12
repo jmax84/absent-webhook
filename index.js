@@ -1,32 +1,525 @@
 import express from "express";
 import fetch from "node-fetch";
 import twilioPkg from "twilio";
+import XLSX from "xlsx";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const { twiml: Twiml } = twilioPkg;
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
-
 app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
+const DATA_ROOT = path.join(__dirname, "data", "JARVIS_DATA_FINAL_2026-06-XX");
 const pendingRequests = new Map();
+let knowledgeRecords = [];
+let knowledgeLoadedAt = null;
+let knowledgeLoadError = null;
+
+const SENSITIVE_FIELD_PATTERNS = [
+  /cost/i,
+  /price/i,
+  /unit\s*price/i,
+  /total/i,
+  /amount/i,
+  /margin/i,
+  /markup/i,
+  /account/i,
+  /approval/i
+];
+
+const CATEGORY_HINTS = [
+  { category: "01_PARTS_INVENTORY", terms: ["part", "parts", "bearing", "bin", "inventory", "stock", "do we have", "where is"] },
+  { category: "02_OPEN_ORDERS", terms: ["ordered", "order", "po", "purchase", "delivery", "received", "vendor", "open order"] },
+  { category: "03_INK_ROOM", terms: ["ink", "pantone", "pms", "formula", "drawdown", "extender", "inx", "anilox", "waste tote"] },
+  { category: "04_HVAC_AND_BUILDING", terms: ["hvac", "ac", "air conditioning", "thermostat", "cooling", "heat", "pre-press", "prepress"] },
+  { category: "05_KNIVES", terms: ["knife", "knives", "cutoff", "cut-off", "profile", "sharpen", "sharpening"] },
+  { category: "06_PURCHASING_PO_REQUESTS", terms: ["po request", "purchase order request", "blank po", "po form", "por-richmond"] },
+  { category: "07_MAGNA_REBUILDS", terms: ["magna", "motor", "drive", "rebuild", "repair", "quote"] },
+  { category: "08_MAILSHOP_EQUIPMENT_OUTGOING", terms: ["mailshop", "warehouse 4", "wh4", "building 4", "folder", "stamper", "fire jet", "pickup", "picked up"] },
+  { category: "09_MAPS", terms: ["map", "where", "eyewash", "eye wash", "fire extinguisher", "extinguisher", "thermostat"] },
+  { category: "10_SAFETY_TRAINING", terms: ["safety", "training", "forklift", "certified", "operator", "certification", "clamp truck"] },
+  { category: "11_2-2-3_Schedule", terms: ["2-2-3", "schedule", "dayshift", "day shift", "nightshift", "night shift", "calendar"] }
+];
 
 function normalize(text) {
-  return (text || "").trim();
+  return (text || "").toString().trim();
 }
 
 function lower(text) {
   return normalize(text).toLowerCase();
 }
 
+function normalizeLoose(text) {
+  return normalize(text)
+    .toLowerCase()
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizePart(text) {
+  return normalize(text).toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function digitsOnly(text) {
+  return normalize(text).replace(/\D/g, "");
+}
+
+function escapeHtml(text) {
+  return normalize(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function walkFiles(dir) {
+  if (!fs.existsSync(dir)) return [];
+
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  const files = [];
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...walkFiles(fullPath));
+    } else {
+      files.push(fullPath);
+    }
+  }
+
+  return files;
+}
+
+function relativeDataPath(filePath) {
+  return path.relative(DATA_ROOT, filePath).split(path.sep).join("/");
+}
+
+function publicKbUrl(filePath) {
+  return "/kb/" + encodeURI(relativeDataPath(filePath));
+}
+
+function categoryFromFile(filePath) {
+  return relativeDataPath(filePath).split("/")[0] || "UNKNOWN";
+}
+
+function titleFromFile(filePath) {
+  return path.basename(filePath).replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
+}
+
+function isSensitiveField(fieldName) {
+  return SENSITIVE_FIELD_PATTERNS.some((pattern) => pattern.test(fieldName || ""));
+}
+
+function getFileType(filePath) {
+  return path.extname(filePath).toLowerCase().replace(".", "");
+}
+
+function recordSearchText(record) {
+  const pieces = [record.title, record.category, record.sourceFile, record.body, record.sheetName];
+  if (record.fields) {
+    for (const [key, value] of Object.entries(record.fields)) {
+      if (isSensitiveField(key)) continue;
+      pieces.push(key, value);
+    }
+  }
+  return pieces.filter(Boolean).join(" ");
+}
+
+function extractPartLikeKeys(text) {
+  const keys = new Set();
+  const rawTokens = normalize(text).match(/[A-Za-z0-9][A-Za-z0-9._\-/]{1,}[A-Za-z0-9]/g) || [];
+
+  for (const token of rawTokens) {
+    const normalized = normalizePart(token);
+    if (normalized.length >= 3 && /\d/.test(normalized)) {
+      keys.add(normalized);
+    }
+    const digits = digitsOnly(token);
+    if (digits.length >= 4) {
+      keys.add(digits);
+    }
+  }
+
+  return [...keys];
+}
+
+function addKnowledgeRecord(record) {
+  const text = recordSearchText(record);
+  const normalizedText = normalizeLoose(text);
+  const partKeys = new Set(extractPartLikeKeys(text));
+
+  if (record.fields) {
+    for (const [key, value] of Object.entries(record.fields)) {
+      const k = lower(key);
+      if (/(part|item|number|model|serial|quote|knife|color|pantone|pms|machine|id)/.test(k)) {
+        for (const partKey of extractPartLikeKeys(value)) {
+          partKeys.add(partKey);
+        }
+      }
+    }
+  }
+
+  knowledgeRecords.push({
+    ...record,
+    normalizedText,
+    partKeys: [...partKeys]
+  });
+}
+
+function loadMarkdownFile(filePath) {
+  const body = fs.readFileSync(filePath, "utf8");
+  addKnowledgeRecord({
+    type: "document",
+    category: categoryFromFile(filePath),
+    title: titleFromFile(filePath),
+    sourceFile: relativeDataPath(filePath),
+    url: publicKbUrl(filePath),
+    body
+  });
+}
+
+function cleanCellValue(value) {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return normalize(value);
+}
+
+function loadWorkbookFile(filePath) {
+  const workbook = XLSX.readFile(filePath, { cellDates: true });
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+
+    rows.forEach((row, index) => {
+      const fields = {};
+      for (const [key, value] of Object.entries(row)) {
+        const cleanKey = normalize(key);
+        const cleanValue = cleanCellValue(value);
+        if (!cleanKey || cleanKey.startsWith("__EMPTY")) continue;
+        fields[cleanKey] = cleanValue;
+      }
+
+      const nonEmptyValues = Object.values(fields).filter((value) => normalize(value)).length;
+      if (nonEmptyValues === 0) return;
+
+      addKnowledgeRecord({
+        type: "spreadsheet-row",
+        category: categoryFromFile(filePath),
+        title: titleFromFile(filePath),
+        sourceFile: relativeDataPath(filePath),
+        url: publicKbUrl(filePath),
+        sheetName,
+        rowNumber: index + 2,
+        fields
+      });
+    });
+  }
+}
+
+function loadPdfFile(filePath) {
+  addKnowledgeRecord({
+    type: "file",
+    category: categoryFromFile(filePath),
+    title: titleFromFile(filePath),
+    sourceFile: relativeDataPath(filePath),
+    url: publicKbUrl(filePath),
+    body: `${titleFromFile(filePath)} PDF reference document. Use category notes for how to interpret this file.`
+  });
+}
+
+function loadKnowledgeBase() {
+  knowledgeRecords = [];
+  knowledgeLoadError = null;
+
+  try {
+    const files = walkFiles(DATA_ROOT);
+
+    for (const filePath of files) {
+      const rel = relativeDataPath(filePath);
+      if (rel.startsWith("99_DO_NOT_USE_YET/")) continue;
+
+      const ext = getFileType(filePath);
+      try {
+        if (["md", "txt"].includes(ext)) {
+          loadMarkdownFile(filePath);
+        } else if (["xlsx", "xls"].includes(ext)) {
+          loadWorkbookFile(filePath);
+        } else if (ext === "pdf") {
+          loadPdfFile(filePath);
+        }
+      } catch (error) {
+        console.error(`Failed to load ${rel}:`, error);
+        addKnowledgeRecord({
+          type: "load-error",
+          category: categoryFromFile(filePath),
+          title: titleFromFile(filePath),
+          sourceFile: relativeDataPath(filePath),
+          url: publicKbUrl(filePath),
+          body: `This file could not be loaded: ${error.message}`
+        });
+      }
+    }
+
+    knowledgeLoadedAt = new Date();
+    console.log(`JARVIS knowledge loaded: ${knowledgeRecords.length} records from ${files.length} files.`);
+  } catch (error) {
+    knowledgeLoadError = error;
+    console.error("JARVIS knowledge load failed:", error);
+  }
+}
+
+function levenshtein(a, b) {
+  if (a === b) return 0;
+  if (!a) return b.length;
+  if (!b) return a.length;
+
+  const matrix = Array.from({ length: a.length + 1 }, () => []);
+  for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
+  for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      );
+    }
+  }
+
+  return matrix[a.length][b.length];
+}
+
+function getCategoryBoost(query, category) {
+  const q = lower(query);
+  let boost = 0;
+
+  for (const hint of CATEGORY_HINTS) {
+    if (hint.category !== category) continue;
+    for (const term of hint.terms) {
+      if (q.includes(term)) boost += 15;
+    }
+  }
+
+  return boost;
+}
+
+function scoreRecord(record, query) {
+  const qLoose = normalizeLoose(query);
+  const qLower = lower(query);
+  const terms = qLoose.split(" ").filter((term) => term.length >= 2);
+  const qPart = normalizePart(query);
+  const qDigits = digitsOnly(query);
+  let score = getCategoryBoost(query, record.category);
+  let reason = [];
+
+  if (!qLoose) return { score: 0, reason };
+
+  if (record.normalizedText.includes(qLoose)) {
+    score += 75;
+    reason.push("phrase match");
+  }
+
+  let matchedTerms = 0;
+  for (const term of terms) {
+    if (record.normalizedText.includes(term)) matchedTerms += 1;
+  }
+  if (matchedTerms > 0) {
+    score += matchedTerms * 8;
+    if (matchedTerms === terms.length) score += 20;
+    reason.push(`${matchedTerms} term match`);
+  }
+
+  if (qPart.length >= 3) {
+    for (const key of record.partKeys || []) {
+      if (key === qPart) {
+        score += 120;
+        reason.push("exact normalized part match");
+      } else if (key.includes(qPart) || qPart.includes(key)) {
+        const shorter = Math.min(key.length, qPart.length);
+        if (shorter >= 4) {
+          score += 65;
+          reason.push("partial part match");
+        }
+      } else {
+        const maxLen = Math.max(key.length, qPart.length);
+        if (maxLen >= 4) {
+          const distance = levenshtein(key, qPart);
+          const limit = maxLen <= 6 ? 1 : 2;
+          if (distance <= limit) {
+            score += 45;
+            reason.push("fuzzy part match");
+          }
+        }
+      }
+    }
+  }
+
+  if (qDigits.length >= 4) {
+    for (const key of record.partKeys || []) {
+      const keyDigits = digitsOnly(key);
+      if (keyDigits === qDigits) {
+        score += 90;
+        reason.push("digits-only match");
+      } else if (keyDigits.includes(qDigits) || qDigits.includes(keyDigits)) {
+        score += 45;
+        reason.push("partial digits match");
+      }
+    }
+  }
+
+  if (record.type === "spreadsheet-row") {
+    score += 5;
+  }
+
+  return { score, reason };
+}
+
+function searchKnowledge(query, options = {}) {
+  const maxResults = options.maxResults || 5;
+  const scored = knowledgeRecords
+    .map((record) => {
+      const result = scoreRecord(record, query);
+      return { ...record, score: result.score, reason: result.reason };
+    })
+    .filter((record) => record.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return scored.slice(0, maxResults);
+}
+
+function safeFields(fields) {
+  const entries = Object.entries(fields || {})
+    .filter(([key, value]) => !isSensitiveField(key) && normalize(value) !== "")
+    .slice(0, 10);
+  return Object.fromEntries(entries);
+}
+
+function formatFields(fields) {
+  const safe = safeFields(fields);
+  const lines = [];
+
+  for (const [key, value] of Object.entries(safe)) {
+    lines.push(`${key}: ${value}`);
+  }
+
+  return lines.join("\n");
+}
+
+function makeExcerpt(body, query, maxLen = 700) {
+  const text = normalize(body).replace(/\s+/g, " ");
+  if (text.length <= maxLen) return text;
+
+  const qTerms = normalizeLoose(query).split(" ").filter((term) => term.length > 3);
+  let idx = -1;
+  const lowerText = text.toLowerCase();
+
+  for (const term of qTerms) {
+    idx = lowerText.indexOf(term);
+    if (idx >= 0) break;
+  }
+
+  if (idx < 0) idx = 0;
+
+  const start = Math.max(0, idx - 180);
+  const end = Math.min(text.length, start + maxLen);
+  return (start > 0 ? "..." : "") + text.slice(start, end) + (end < text.length ? "..." : "");
+}
+
+function findPdfByName(fragment) {
+  const frag = lower(fragment);
+  return knowledgeRecords.find((record) => record.type === "file" && lower(record.sourceFile).includes(frag));
+}
+
+function linkLine(record) {
+  if (!record?.url) return "";
+  return `\n\nOpen file: ${record.url}`;
+}
+
+function answerPoRequest() {
+  const form = findPdfByName("po_request_form") || findPdfByName("po request form");
+  return (
+    "To request a PO:\n\n" +
+    "1. Fill out the PO Request Form.\n" +
+    "2. Attach the quote that supports the price used on the PO Request Form.\n" +
+    "3. Email the completed form and quote to POR-Richmond@wearemoore.com.\n\n" +
+    "Important: JARVIS cannot approve purchases, create POs, or say something has been ordered unless the approved order records clearly confirm it." +
+    (form ? linkLine(form) : "")
+  );
+}
+
+function answerFromTopResults(query, results) {
+  if (!results.length) {
+    return (
+      "I could not find that in the current JARVIS knowledge base.\n\n" +
+      "I should not guess. Try giving me a part number, machine/area, vendor name, ink color, PO/order clue, or location keyword."
+    );
+  }
+
+  const top = results[0];
+
+  if (top.type === "spreadsheet-row") {
+    let reply = `Based on the current JARVIS data, I found a likely match in ${top.sourceFile}`;
+    if (top.sheetName) reply += `, sheet ${top.sheetName}`;
+    reply += ":\n\n" + formatFields(top.fields);
+
+    if (top.category.includes("PARTS") || top.category.includes("KNIVES") || top.category.includes("MAILSHOP") || top.category.includes("INK")) {
+      reply += "\n\nPlease physically verify before relying on this for production.";
+    }
+
+    if (results.length > 1 && results[1].score >= top.score - 25) {
+      reply += "\n\nOther possible matches:";
+      for (const result of results.slice(1, 4)) {
+        if (result.type === "spreadsheet-row") {
+          const safe = safeFields(result.fields);
+          const preview = Object.entries(safe).slice(0, 4).map(([k, v]) => `${k}: ${v}`).join(" | ");
+          reply += `\n- ${preview}`;
+        } else {
+          reply += `\n- ${result.title} (${result.sourceFile})`;
+        }
+      }
+      reply += "\n\nIf this is not the item you meant, ask again with more detail.";
+    }
+
+    return reply;
+  }
+
+  if (top.type === "file") {
+    return (
+      `I found a relevant reference file: ${top.sourceFile}.` +
+      linkLine(top) +
+      "\n\nIf this is a map or form, open the file and verify the exact location/details before relying on it."
+    );
+  }
+
+  return (
+    `I found this in ${top.sourceFile}:\n\n` +
+    makeExcerpt(top.body, query) +
+    linkLine(top)
+  );
+}
+
 function extractSimplePartInfo(text) {
   const cleaned = normalize(text)
+    .replace(/^i need part/i, "")
     .replace(/^request part/i, "")
     .replace(/^add part/i, "")
     .replace(/^need part/i, "")
     .trim();
 
-  const match = cleaned.match(/^([A-Za-z0-9\-_.]+)\s*(.*)$/);
+  const match = cleaned.match(/^([A-Za-z0-9\-_.\/]+)\s*(.*)$/);
 
   if (!match) {
     return {
@@ -53,6 +546,10 @@ function isHighPriorityDueDate(dueDateText) {
     "next week",
     "within 2 weeks",
     "within two weeks",
+    "down machine",
+    "machine down",
+    "cannot run",
+    "production stopped",
     "next monday",
     "next tuesday",
     "next wednesday",
@@ -62,29 +559,19 @@ function isHighPriorityDueDate(dueDateText) {
     "next sunday"
   ];
 
-  if (urgentPhrases.some((phrase) => text.includes(phrase))) {
-    return true;
-  }
+  if (urgentPhrases.some((phrase) => text.includes(phrase))) return true;
 
   const match = text.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
-
-  if (!match) {
-    return false;
-  }
+  if (!match) return false;
 
   const now = new Date();
   const month = Number(match[1]) - 1;
   const day = Number(match[2]);
   let year = match[3] ? Number(match[3]) : now.getFullYear();
-
-  if (year < 100) {
-    year += 2000;
-  }
+  if (year < 100) year += 2000;
 
   const due = new Date(year, month, day);
-  const diffMs = due.getTime() - now.getTime();
-  const diffDays = diffMs / (1000 * 60 * 60 * 24);
-
+  const diffDays = (due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
   return diffDays <= 14;
 }
 
@@ -117,17 +604,12 @@ async function writePartsRequestToSheet(request) {
 
   if (!webhookUrl || !secret) {
     console.warn("Missing PARTS_REQUEST_WEBHOOK_URL or PARTS_REQUEST_SECRET");
-    return {
-      ok: false,
-      error: "Missing spreadsheet webhook configuration"
-    };
+    return { ok: false, error: "Missing spreadsheet webhook configuration" };
   }
 
   const response = await fetch(webhookUrl, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       secret,
       requesterName: request.requesterName || "",
@@ -149,23 +631,50 @@ async function writePartsRequestToSheet(request) {
   try {
     return JSON.parse(text);
   } catch {
-    return {
-      ok: response.ok,
-      raw: text
-    };
+    return { ok: response.ok, raw: text };
   }
+}
+
+function isPurchaseOrderPolicyQuestion(msg) {
+  return (
+    msg.includes("po request") ||
+    msg.includes("purchase order request") ||
+    msg.includes("blank po") ||
+    msg.includes("po form") ||
+    msg.includes("purchase order form") ||
+    msg.includes("por-richmond")
+  );
+}
+
+function isDirectInventoryLookup(msg) {
+  return (
+    msg.includes("do we have") ||
+    msg.includes("where is") ||
+    msg.includes("looking for") ||
+    msg.includes("find") ||
+    msg.includes("inventory") ||
+    msg.includes("on hand") ||
+    msg.includes("available") ||
+    msg.includes("who") ||
+    msg.includes("what") ||
+    msg.includes("when") ||
+    msg.includes("where") ||
+    msg.includes("how")
+  );
 }
 
 async function getJarvisReply({ from = "browser-test", body = "", requesterName = "" }) {
   const cleanBody = normalize(body);
   const msg = lower(cleanBody);
 
+  if (knowledgeLoadError) {
+    return "JARVIS had a problem loading the knowledge base. Jonathan needs to check the Render logs.";
+  }
+
   const pending = pendingRequests.get(from);
 
   if (pending) {
-    if (requesterName) {
-      pending.requesterName = requesterName;
-    }
+    if (requesterName) pending.requesterName = requesterName;
 
     if (pending.step === "awaiting_due_date") {
       pending.requestedDueDate = cleanBody;
@@ -181,10 +690,7 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
     if (pending.step === "awaiting_machine") {
       pending.machineOrArea = cleanBody;
 
-      const priority = isHighPriorityDueDate(pending.requestedDueDate)
-        ? "High"
-        : "Normal";
-
+      const priority = isHighPriorityDueDate(pending.requestedDueDate) ? "High" : "Normal";
       let jonathanNotified = "No";
 
       if (priority === "High") {
@@ -218,15 +724,11 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
       };
 
       let sheetResult;
-
       try {
         sheetResult = await writePartsRequestToSheet(sheetRequest);
       } catch (error) {
         console.error("Failed to write parts request to sheet:", error);
-        sheetResult = {
-          ok: false,
-          error: error.toString()
-        };
+        sheetResult = { ok: false, error: error.toString() };
       }
 
       pendingRequests.delete(from);
@@ -253,8 +755,7 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
         "Important: This is not ordered yet. Jonathan still needs to review it.";
 
       if (priority === "High") {
-        reply +=
-          "\n\nThis was marked HIGH priority because the requested due date appears to be within 2 weeks or urgent. Jonathan has been notified.";
+        reply += "\n\nThis was marked HIGH priority because the requested due date appears to be within 2 weeks or urgent. Jonathan has been notified.";
       }
 
       return reply;
@@ -263,110 +764,67 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
 
   if (msg === "" || msg === "help") {
     return (
-      "I can help with parts requests, ink questions, HVAC / AC routing, maps, open order questions, and escalation to Jonathan when needed.\n\n" +
-      "I do not have the full knowledge base loaded yet, so if I do not know something, I should not guess."
+      "What can I help you with?\n\n" +
+      "You can ask about parts, ink, HVAC/thermostats, maps, knives, PO requests, Magna rebuilds, Warehouse 4 mailshop equipment, safety training, or the 2-2-3 schedule.\n\n" +
+      `Knowledge base records loaded: ${knowledgeRecords.length}.`
     );
   }
 
+  if (isPurchaseOrderPolicyQuestion(msg)) {
+    return answerPoRequest();
+  }
+
   if (
-    msg === "parts" ||
-    msg.includes("part ") ||
-    msg.includes("parts ") ||
     msg.startsWith("i need part") ||
-    msg.startsWith("need part")
+    msg.startsWith("need part") ||
+    msg.startsWith("request part") ||
+    msg.startsWith("add part")
   ) {
-    if (
-      msg.startsWith("request part") ||
-      msg.startsWith("add part") ||
-      msg.startsWith("need part") ||
-      msg.startsWith("i need part")
-    ) {
-      const info = extractSimplePartInfo(cleanBody.replace(/^i need part/i, "need part"));
+    const info = extractSimplePartInfo(cleanBody);
 
-      pendingRequests.set(from, {
-        step: "awaiting_due_date",
-        requesterName,
-        requesterPhone: from,
-        partNumber: info.partNumber,
-        partDescription: info.partDescription,
-        quantityRequested: "",
-        notes: cleanBody
-      });
+    const lookupResults = searchKnowledge(info.partNumber || cleanBody, { maxResults: 3 })
+      .filter((record) => record.category.includes("PARTS"));
 
-      return (
-        "I can add this to Jonathan's next Purchase Order Request list.\n\n" +
-        "Part Number: " + (info.partNumber || "Not provided") + "\n" +
-        "Description: " + (info.partDescription || "Not provided") + "\n\n" +
-        "What requested due date should I use?\n\n" +
-        "Examples: 6/20, next Friday, ASAP, or within 2 weeks."
-      );
+    let foundNote = "";
+    if (lookupResults.length) {
+      foundNote = "\n\nI found this possible inventory match first:\n" + answerFromTopResults(info.partNumber || cleanBody, lookupResults) + "\n\n";
     }
 
+    pendingRequests.set(from, {
+      step: "awaiting_due_date",
+      requesterName,
+      requesterPhone: from,
+      partNumber: info.partNumber,
+      partDescription: info.partDescription,
+      quantityRequested: "",
+      notes: cleanBody
+    });
+
     return (
-      "For parts questions, tell me the part number if you know it, the machine or area, and whether it is urgent.\n\n" +
-      "Example: i need part 12345"
+      foundNote +
+      "I can add this to Jonathan's next Purchase Order Request list.\n\n" +
+      "Part Number: " + (info.partNumber || "Not provided") + "\n" +
+      "Description: " + (info.partDescription || "Not provided") + "\n\n" +
+      "What requested due date should I use?\n\n" +
+      "Examples: 6/20, next Friday, ASAP, or within 2 weeks."
     );
   }
 
-  if (msg === "ink" || msg.includes("ink")) {
-    return (
-      "For ink questions, include the color or Pantone number, machine, job/customer if known, and whether it is urgent.\n\n" +
-      "Example: do we have ink 186?\n\n" +
-      "I will use Jonathan's ink notes once they are loaded. If I cannot answer confidently, I should escalate instead of guessing."
-    );
+  if (isDirectInventoryLookup(msg)) {
+    const results = searchKnowledge(cleanBody, { maxResults: 6 });
+    return answerFromTopResults(cleanBody, results);
   }
 
-  if (
-    msg === "hvac" ||
-    msg.includes("hvac") ||
-    msg.includes("ac ") ||
-    msg.includes("air conditioning") ||
-    msg.includes("thermostat")
-  ) {
-    return (
-      "For HVAC / AC questions, include the warehouse or department, area affected, thermostat reading if known, and photos/video if available.\n\n" +
-      "Do not reset diagnostics unless instructed.\n\n" +
-      "JARVIS should escalate to Jonathan before recommending vendor calls unless there is a clear emergency rule."
-    );
-  }
-
-  if (
-    msg === "maps" ||
-    msg.includes("map") ||
-    msg.includes("fire extinguisher") ||
-    msg.includes("eyewash") ||
-    msg.includes("eye wash")
-  ) {
-    return (
-      "Map support is planned for:\n\n" +
-      "- HVAC thermostat locations\n" +
-      "- Fire extinguisher locations\n" +
-      "- Eye wash station locations\n" +
-      "- Parts / ink reference locations\n\n" +
-      "Map images will be added after Jonathan uploads the facility maps."
-    );
-  }
-
-  if (msg.includes("order") || msg.includes("ordered")) {
-    return (
-      "For order questions, include the part, vendor, machine, or item you are asking about.\n\n" +
-      "Example: did Jonathan order doctor blades?\n\n" +
-      "Open order notes are not fully loaded yet."
-    );
-  }
-
-  if (msg.includes("jonathan") || msg.includes("escalate")) {
-    return (
-      "If I cannot answer confidently, I should escalate to Jonathan instead of guessing.\n\n" +
-      "High-priority purchase requests, urgent HVAC issues, unclear safety issues, and missing critical information should be escalated."
-    );
+  const results = searchKnowledge(cleanBody, { maxResults: 5 });
+  if (results.length) {
+    return answerFromTopResults(cleanBody, results);
   }
 
   return (
     "I received your question:\n\n" +
     `"${cleanBody}"\n\n` +
     "I do not have enough information loaded to answer that confidently yet.\n\n" +
-    "For now, try asking about parts requests, ink, HVAC / AC, maps, or open orders."
+    "I should not guess. Try asking with a part number, ink color, machine/area, vendor, order clue, map location, or schedule keyword."
   );
 }
 
@@ -378,221 +836,33 @@ function getAskPageHtml() {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>J.A.R.V.I.S.</title>
   <style>
-    :root {
-      --blue: #123a63;
-      --blue2: #0f2f52;
-      --dark: #1f2933;
-      --border: #d6dee8;
-      --green: #ecfdf3;
-      --green-border: #a6d9b7;
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    html, body {
-      height: 100%;
-      margin: 0;
-      font-family: Arial, Helvetica, sans-serif;
-      background: #f6f9fc;
-      color: var(--dark);
-    }
-
-    body {
-      overflow: hidden;
-    }
-
-    .app {
-      height: 100dvh;
-      max-width: 860px;
-      margin: 0 auto;
-      background: white;
-      display: flex;
-      flex-direction: column;
-      border-left: 1px solid var(--border);
-      border-right: 1px solid var(--border);
-    }
-
-    .header {
-      flex: 0 0 auto;
-      background: linear-gradient(135deg, var(--blue), var(--blue2));
-      color: white;
-      padding: 15px 16px 13px;
-      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.18);
-      z-index: 2;
-      text-align: center;
-    }
-
-    .header h1 {
-      margin: 0;
-      font-size: 30px;
-      letter-spacing: 3px;
-      line-height: 1;
-    }
-
-    .header p {
-      margin: 6px 0 0;
-      font-size: 12px;
-      opacity: 0.95;
-    }
-
-    .chat {
-      flex: 1 1 auto;
-      overflow-y: auto;
-      padding: 16px 14px;
-      background:
-        radial-gradient(circle at top left, rgba(18,58,99,0.06), transparent 35%),
-        #f7f9fc;
-    }
-
-    .bubble-wrap {
-      display: flex;
-      margin: 10px 0;
-    }
-
-    .bubble-wrap.user-wrap {
-      justify-content: flex-end;
-    }
-
-    .bubble-wrap.jarvis-wrap {
-      justify-content: flex-start;
-    }
-
-    .bubble {
-      max-width: 82%;
-      white-space: pre-wrap;
-      line-height: 1.42;
-      border-radius: 18px;
-      padding: 12px 14px;
-      font-size: 16px;
-      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
-    }
-
-    .bubble.user {
-      background: var(--blue);
-      color: white;
-      border-bottom-right-radius: 6px;
-    }
-
-    .bubble.jarvis {
-      background: white;
-      border: 1px solid var(--border);
-      border-bottom-left-radius: 6px;
-    }
-
-    .bubble.system {
-      background: var(--green);
-      border: 1px solid var(--green-border);
-      border-bottom-left-radius: 6px;
-    }
-
-    .composer {
-      flex: 0 0 auto;
-      background: white;
-      border-top: 1px solid var(--border);
-      padding: 10px;
-      box-shadow: 0 -2px 10px rgba(15, 23, 42, 0.06);
-    }
-
-    .name-row {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-
-    .name-row input {
-      width: 100%;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 10px 12px;
-      font-size: 15px;
-    }
-
-    .input-row {
-      display: flex;
-      gap: 8px;
-      align-items: flex-end;
-    }
-
-    textarea {
-      flex: 1 1 auto;
-      min-height: 48px;
-      max-height: 120px;
-      resize: none;
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 12px;
-      font-size: 16px;
-      font-family: Arial, Helvetica, sans-serif;
-      line-height: 1.3;
-    }
-
-    .send {
-      flex: 0 0 auto;
-      background: var(--blue);
-      color: white;
-      border: none;
-      border-radius: 16px;
-      padding: 13px 17px;
-      font-size: 16px;
-      font-weight: bold;
-      cursor: pointer;
-      min-height: 48px;
-    }
-
-    .send:disabled {
-      background: #8aa0b7;
-      cursor: wait;
-    }
-
-    .examples {
-      font-size: 12px;
-      color: #64748b;
-      margin-top: 7px;
-      line-height: 1.35;
-      text-align: center;
-    }
-
-    .fine-print {
-      font-size: 11px;
-      color: #64748b;
-      margin-top: 6px;
-      text-align: center;
-    }
-
-    @media (max-width: 560px) {
-      .app {
-        border-left: none;
-        border-right: none;
-      }
-
-      .header h1 {
-        font-size: 26px;
-      }
-
-      .bubble {
-        max-width: 90%;
-        font-size: 15px;
-      }
-
-      .header {
-        padding: 13px 12px 10px;
-      }
-
-      .chat {
-        padding: 12px 10px;
-      }
-
-      .composer {
-        padding: 9px;
-      }
-
-      .send {
-        padding-left: 14px;
-        padding-right: 14px;
-      }
-    }
+    :root { --blue:#123a63; --blue2:#0f2f52; --dark:#1f2933; --border:#d6dee8; --green:#ecfdf3; --green-border:#a6d9b7; }
+    * { box-sizing:border-box; }
+    html, body { height:100%; margin:0; font-family:Arial, Helvetica, sans-serif; background:#f6f9fc; color:var(--dark); }
+    body { overflow:hidden; }
+    .app { height:100dvh; max-width:860px; margin:0 auto; background:white; display:flex; flex-direction:column; border-left:1px solid var(--border); border-right:1px solid var(--border); }
+    .header { flex:0 0 auto; background:linear-gradient(135deg, var(--blue), var(--blue2)); color:white; padding:15px 16px 13px; box-shadow:0 2px 10px rgba(15,23,42,0.18); z-index:2; text-align:center; }
+    .header h1 { margin:0; font-size:30px; letter-spacing:3px; line-height:1; }
+    .header p { margin:6px 0 0; font-size:12px; opacity:.95; }
+    .chat { flex:1 1 auto; overflow-y:auto; padding:16px 14px; background:radial-gradient(circle at top left, rgba(18,58,99,.06), transparent 35%), #f7f9fc; }
+    .bubble-wrap { display:flex; margin:10px 0; }
+    .user-wrap { justify-content:flex-end; }
+    .jarvis-wrap { justify-content:flex-start; }
+    .bubble { max-width:82%; white-space:pre-wrap; line-height:1.42; border-radius:18px; padding:12px 14px; font-size:16px; box-shadow:0 1px 4px rgba(15,23,42,.06); }
+    .bubble a { color:inherit; text-decoration:underline; }
+    .user { background:var(--blue); color:white; border-bottom-right-radius:6px; }
+    .jarvis { background:white; border:1px solid var(--border); border-bottom-left-radius:6px; }
+    .system { background:var(--green); border:1px solid var(--green-border); border-bottom-left-radius:6px; }
+    .composer { flex:0 0 auto; background:white; border-top:1px solid var(--border); padding:10px; box-shadow:0 -2px 10px rgba(15,23,42,.06); }
+    .name-row { display:flex; gap:8px; margin-bottom:8px; }
+    .name-row input { width:100%; border:1px solid var(--border); border-radius:12px; padding:10px 12px; font-size:15px; }
+    .input-row { display:flex; gap:8px; align-items:flex-end; }
+    textarea { flex:1 1 auto; min-height:48px; max-height:120px; resize:none; border:1px solid var(--border); border-radius:16px; padding:12px; font-size:16px; font-family:Arial, Helvetica, sans-serif; line-height:1.3; }
+    .send { flex:0 0 auto; background:var(--blue); color:white; border:none; border-radius:16px; padding:13px 17px; font-size:16px; font-weight:bold; cursor:pointer; min-height:48px; }
+    .send:disabled { background:#8aa0b7; cursor:wait; }
+    .examples { font-size:12px; color:#64748b; margin-top:7px; line-height:1.35; text-align:center; }
+    .fine-print { font-size:11px; color:#64748b; margin-top:6px; text-align:center; }
+    @media (max-width:560px) { .app{border-left:none;border-right:none;} .header h1{font-size:26px;} .bubble{max-width:90%;font-size:15px;} .header{padding:13px 12px 10px;} .chat{padding:12px 10px;} .composer{padding:9px;} .send{padding-left:14px;padding-right:14px;} }
   </style>
 </head>
 <body>
@@ -601,135 +871,68 @@ function getAskPageHtml() {
       <h1>J.A.R.V.I.S.</h1>
       <p>Jonathan's Automated Resource &amp; Virtual Information System</p>
     </header>
-
     <main id="chat" class="chat"></main>
-
     <footer class="composer">
-      <div class="name-row">
-        <input id="name" placeholder="Your name, example: Joe" autocomplete="name" />
-      </div>
-
+      <div class="name-row"><input id="name" placeholder="Your name, example: Joe" autocomplete="name" /></div>
       <div class="input-row">
         <textarea id="question" placeholder="Ask JARVIS like you would ask Jonathan..."></textarea>
         <button id="askButton" class="send" type="button" onclick="askJarvis()">Ask</button>
       </div>
-
-      <div class="examples">
-        Examples: “do we have ink 186?” • “i need part 12345” • “where is the thermostat for the envelope department?”
-      </div>
-
-      <div class="fine-print">
-        Parts requests are not ordered until Jonathan reviews them. Machine troubleshooting is not loaded yet.
-      </div>
+      <div class="examples">Examples: “do we have ink 186?” • “i need part 12345” • “where is the thermostat for the envelope department?”</div>
+      <div class="fine-print">Parts requests are not ordered until Jonathan reviews them. JARVIS answers from the current knowledge snapshot.</div>
     </footer>
   </div>
-
   <script>
     function getSessionId() {
       let id = localStorage.getItem("jarvisSessionId");
-
       if (!id) {
-        if (window.crypto && crypto.randomUUID) {
-          id = crypto.randomUUID();
-        } else {
-          id = "session-" + Date.now() + "-" + Math.random().toString(16).slice(2);
-        }
-
+        id = window.crypto && crypto.randomUUID ? crypto.randomUUID() : "session-" + Date.now() + "-" + Math.random().toString(16).slice(2);
         localStorage.setItem("jarvisSessionId", id);
       }
-
       return id;
     }
-
-    function scrollChatToBottom() {
-      const chat = document.getElementById("chat");
-      chat.scrollTop = chat.scrollHeight;
+    function scrollChatToBottom() { const chat = document.getElementById("chat"); chat.scrollTop = chat.scrollHeight; }
+    function linkify(text) {
+      const escaped = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+      return escaped.replace(/(\/kb\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
     }
-
     function addMessage(text, type) {
       const chat = document.getElementById("chat");
-
       const wrap = document.createElement("div");
       wrap.className = "bubble-wrap " + (type === "user" ? "user-wrap" : "jarvis-wrap");
-
       const bubble = document.createElement("div");
       bubble.className = "bubble " + type;
-      bubble.textContent = text;
-
+      bubble.innerHTML = linkify(text);
       wrap.appendChild(bubble);
       chat.appendChild(wrap);
       scrollChatToBottom();
     }
-
     async function askJarvis() {
       const nameInput = document.getElementById("name");
       const questionInput = document.getElementById("question");
       const button = document.getElementById("askButton");
-
       const name = nameInput.value.trim();
       const question = questionInput.value.trim();
-
-      if (!question) {
-        questionInput.focus();
-        return;
-      }
-
+      if (!question) { questionInput.focus(); return; }
       localStorage.setItem("jarvisName", name);
-
-      button.disabled = true;
-      button.textContent = "...";
-
-      addMessage(question, "user");
-      questionInput.value = "";
-
+      button.disabled = true; button.textContent = "...";
+      addMessage(question, "user"); questionInput.value = "";
       try {
-        const response = await fetch("/api/ask", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            sessionId: getSessionId(),
-            name,
-            question
-          })
-        });
-
+        const response = await fetch("/api/ask", { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ sessionId:getSessionId(), name, question }) });
         const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.error || "Request failed");
-        }
-
+        if (!response.ok) throw new Error(data.error || "Request failed");
         addMessage(data.reply, "jarvis");
       } catch (error) {
-        addMessage(
-          "I had a problem answering that. Jonathan needs to check the JARVIS logs.\\n\\nError: " + error.message,
-          "system"
-        );
+        addMessage("I had a problem answering that. Jonathan needs to check the JARVIS logs.\n\nError: " + error.message, "system");
       } finally {
-        button.disabled = false;
-        button.textContent = "Ask";
-        questionInput.focus();
-        scrollChatToBottom();
+        button.disabled = false; button.textContent = "Ask"; questionInput.focus(); scrollChatToBottom();
       }
     }
-
     document.addEventListener("DOMContentLoaded", () => {
       const savedName = localStorage.getItem("jarvisName");
-      if (savedName) {
-        document.getElementById("name").value = savedName;
-      }
-
+      if (savedName) document.getElementById("name").value = savedName;
       addMessage("What can I help you with?", "system");
-
-      document.getElementById("question").addEventListener("keydown", (event) => {
-        if (event.key === "Enter" && !event.shiftKey) {
-          event.preventDefault();
-          askJarvis();
-        }
-      });
-
+      document.getElementById("question").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); askJarvis(); } });
       document.getElementById("question").focus();
     });
   </script>
@@ -737,18 +940,36 @@ function getAskPageHtml() {
 </html>`;
 }
 
-app.get("/", (_req, res) => {
-  res.redirect("/ask");
-});
+app.use("/kb", express.static(DATA_ROOT));
+
+app.get("/", (_req, res) => res.redirect("/ask"));
 
 app.get("/ask", (_req, res) => {
-  console.log("JARVIS ask page loaded");
   res.type("html").send(getAskPageHtml());
 });
 
 app.get("/health", (_req, res) => {
-  console.log("Health check hit");
-  res.status(200).send("J.A.R.V.I.S. online.");
+  res.status(200).json({
+    ok: !knowledgeLoadError,
+    status: "J.A.R.V.I.S. online.",
+    recordsLoaded: knowledgeRecords.length,
+    loadedAt: knowledgeLoadedAt,
+    dataRoot: fs.existsSync(DATA_ROOT) ? "found" : "missing",
+    error: knowledgeLoadError ? knowledgeLoadError.toString() : null
+  });
+});
+
+app.get("/kb-status", (_req, res) => {
+  const counts = {};
+  for (const record of knowledgeRecords) {
+    counts[record.category] = (counts[record.category] || 0) + 1;
+  }
+  res.json({ ok: !knowledgeLoadError, recordsLoaded: knowledgeRecords.length, loadedAt: knowledgeLoadedAt, counts, error: knowledgeLoadError ? knowledgeLoadError.toString() : null });
+});
+
+app.get("/reload-kb", (_req, res) => {
+  loadKnowledgeBase();
+  res.redirect("/kb-status");
 });
 
 app.post("/api/ask", async (req, res) => {
@@ -757,38 +978,16 @@ app.post("/api/ask", async (req, res) => {
     const name = normalize(req.body.name);
     const question = normalize(req.body.question);
 
-    if (!question) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing question"
-      });
-    }
+    if (!question) return res.status(400).json({ ok: false, error: "Missing question" });
 
     const from = "web:" + sessionId;
+    console.log("Web question received:", { from, name, question });
 
-    console.log("Web question received:", {
-      from,
-      name,
-      question
-    });
-
-    const reply = await getJarvisReply({
-      from,
-      body: question,
-      requesterName: name
-    });
-
-    res.json({
-      ok: true,
-      reply
-    });
+    const reply = await getJarvisReply({ from, body: question, requesterName: name });
+    res.json({ ok: true, reply });
   } catch (error) {
     console.error("Web ask error:", error);
-
-    res.status(500).json({
-      ok: false,
-      error: error.toString()
-    });
+    res.status(500).json({ ok: false, error: error.toString() });
   }
 });
 
@@ -797,57 +996,29 @@ app.get("/test", async (req, res) => {
   const from = req.query.from || "browser-test";
   const requesterName = req.query.name || "";
 
-  const reply = await getJarvisReply({
-    from,
-    body,
-    requesterName
-  });
-
-  console.log("Browser test hit:", {
-    from,
-    body,
-    requesterName,
-    reply
-  });
-
+  const reply = await getJarvisReply({ from, body, requesterName });
   res.type("text/plain").send(reply);
 });
 
 app.post("/sms", async (req, res) => {
   try {
-    console.log("====================================");
-    console.log("Incoming SMS webhook hit");
-    console.log("Body:", req.body);
-    console.log("====================================");
-
     const from = req.body.From || "";
     const body = req.body.Body || "";
     const city = req.body.FromCity || "";
     const state = req.body.FromState || "";
 
-    const reply = await getJarvisReply({
-      from,
-      body,
-      requesterName: ""
-    });
+    const reply = await getJarvisReply({ from, body, requesterName: "" });
 
     const teamsWebhook = process.env.TEAMS_WEBHOOK_URL;
-
     if (teamsWebhook) {
       try {
         await fetch(teamsWebhook, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            text:
-              `🤖 *J.A.R.V.I.S. SMS*\n` +
-              `**From:** ${from} (${city}, ${state})\n` +
-              `**Message:** ${body}\n\n` +
-              `**JARVIS Reply:** ${reply}`
+            text: `🤖 *J.A.R.V.I.S. SMS*\n**From:** ${from} (${city}, ${state})\n**Message:** ${body}\n\n**JARVIS Reply:** ${reply}`
           })
         });
-
-        console.log("Posted incoming SMS to Teams");
       } catch (teamsError) {
         console.error("Teams webhook failed:", teamsError);
       }
@@ -855,22 +1026,16 @@ app.post("/sms", async (req, res) => {
 
     const twiml = new Twiml.MessagingResponse();
     twiml.message(reply);
-
     res.type("text/xml").send(twiml.toString());
   } catch (e) {
     console.error("JARVIS SMS handler error:", e);
-
     const twiml = new Twiml.MessagingResponse();
-    twiml.message(
-      "J.A.R.V.I.S. had an internal error while processing that message. Jonathan needs to check the logs."
-    );
-
+    twiml.message("J.A.R.V.I.S. had an internal error while processing that message. Jonathan needs to check the logs.");
     res.type("text/xml").send(twiml.toString());
   }
 });
 
-const port = process.env.PORT || 3001;
+loadKnowledgeBase();
 
-app.listen(port, () => {
-  console.log(`J.A.R.V.I.S. listening on ${port}`);
-});
+const port = process.env.PORT || 3001;
+app.listen(port, () => console.log(`J.A.R.V.I.S. listening on ${port}`));
