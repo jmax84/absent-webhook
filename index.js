@@ -466,17 +466,27 @@ function scoreRecord(record, query) {
       if (recordKey === queryKey) {
         score += 120;
         reason.push("exact normalized key match");
-      } else if (queryKey.length >= 4 && (recordKey.includes(queryKey) || queryKey.includes(recordKey))) {
-        score += 60;
-        reason.push("partial key match");
       } else if (queryKey.length >= 4 && recordKey.length >= 4) {
-        const maxLen = Math.max(queryKey.length, recordKey.length);
-        const distance = levenshtein(recordKey, queryKey);
-        const limit = maxLen <= 6 ? 1 : 2;
+        const queryDigitsOnly = digitsOnly(queryKey);
+        const recordDigitsOnly = digitsOnly(recordKey);
 
-        if (distance <= limit) {
-          score += 40;
-          reason.push("fuzzy key match");
+        if (
+          queryKey[0] === recordKey[0] &&
+          queryDigitsOnly.length >= 4 &&
+          recordDigitsOnly.length >= 4 &&
+          (recordKey.includes(queryKey) || queryKey.includes(recordKey))
+        ) {
+          score += 60;
+          reason.push("strong partial key match");
+        } else {
+          const maxLen = Math.max(queryKey.length, recordKey.length);
+          const distance = levenshtein(recordKey, queryKey);
+          const limit = maxLen <= 6 ? 1 : 2;
+
+          if (distance <= limit) {
+            score += 25;
+            reason.push("weak fuzzy key match");
+          }
         }
       }
     }
@@ -490,11 +500,11 @@ function scoreRecord(record, query) {
         score += 90;
         reason.push("digits-only match");
       } else if (
-        queryDigit.length >= 4 &&
-        recordDigits.length >= 4 &&
+        queryDigit.length >= 5 &&
+        recordDigits.length >= 5 &&
         (recordDigits.includes(queryDigit) || queryDigit.includes(recordDigits))
       ) {
-        score += 40;
+        score += 30;
         reason.push("partial digits match");
       }
     }
@@ -661,9 +671,15 @@ function getPartMatchConfidence(query, record) {
 
   for (const queryKey of queryKeys) {
     for (const recordKey of recordKeys) {
+      const queryDigitsOnly = digitsOnly(queryKey);
+      const recordDigitsOnly = digitsOnly(recordKey);
+
       if (
         queryKey.length >= 4 &&
         recordKey.length >= 4 &&
+        queryKey[0] === recordKey[0] &&
+        queryDigitsOnly.length >= 4 &&
+        recordDigitsOnly.length >= 4 &&
         (recordKey.includes(queryKey) || queryKey.includes(recordKey))
       ) {
         return "likely";
@@ -671,19 +687,7 @@ function getPartMatchConfidence(query, record) {
     }
   }
 
-  for (const queryKey of queryKeys) {
-    for (const recordKey of recordKeys) {
-      if (queryKey.length >= 4 && recordKey.length >= 4) {
-        const maxLen = Math.max(queryKey.length, recordKey.length);
-        const distance = levenshtein(recordKey, queryKey);
-        const limit = maxLen <= 6 ? 1 : 2;
-
-        if (distance <= limit) return "weak";
-      }
-    }
-  }
-
-  return record.score >= 120 ? "likely" : "weak";
+  return "weak";
 }
 
 function answerInkInventoryRow(top) {
@@ -769,7 +773,7 @@ function answerPartSearchResults(query, results) {
     "I did not find an exact match for that part number.\n\n" +
     "I found one possible loose match, but I am not confident it is the same part:\n\n" +
     answerPartsRow(top) +
-    "\n\nIf this is not the item you meant, say: that is not the right part."
+    "\n\nIf this is not the item you meant, say: that is not it."
   );
 }
 
@@ -1119,7 +1123,7 @@ function answerPartsLookup(query, context = {}) {
 
   const confidence = getPartMatchConfidence(query, results[0]);
 
-  if (confidence === "weak" && context.from) {
+  if (confidence !== "exact" && context.from) {
     pendingRequests.set(context.from, {
       step: "possible_part_match",
       requesterName: context.requesterName || "",
