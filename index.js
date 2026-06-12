@@ -22,6 +22,10 @@ let knowledgeRecords = [];
 let knowledgeLoadedAt = null;
 let knowledgeLoadError = null;
 
+const HVAC_THERMOSTAT_IMAGE = "/kb/04_HVAC_AND_BUILDING/HVAC_thermostat_locations.png";
+const EYEWASH_IMAGE = "/kb/04_HVAC_AND_BUILDING/FACILITY_eye_wash_stations.png";
+const FIRE_EXTINGUISHER_IMAGE = "/kb/04_HVAC_AND_BUILDING/FACILITY_fire_extinguishers.png";
+
 const SENSITIVE_FIELD_PATTERNS = [
   /cost/i,
   /unit\s*price/i,
@@ -614,6 +618,10 @@ function linkLine(record) {
   return `\n\nOpen file: ${record.url}`;
 }
 
+function imageLine(imagePath) {
+  return `\n\n[image:${imagePath}]`;
+}
+
 function extractInkNumber(query) {
   const q = lower(query);
   const match = q.match(/(?:ink|pms|pantone|color)\s*#?\s*([0-9]{2,5}[a-z]?)/i);
@@ -984,52 +992,51 @@ function answerPartOrderingProcess() {
 }
 
 function answerThermostatQuestion(query) {
-  const mapFile =
-    findPdfByName("thermostat") ||
-    findPdfByName("facility_thermostats") ||
-    findPdfByName("maps");
-
   const q = lower(query);
   let area = "";
 
   if (q.includes("envelope") || q.includes("wh2") || q.includes("warehouse 2")) {
-    area = "For the envelope department / WH2, use the thermostat map on page 1 and look in the Warehouse 2 / Envelopes area near the envelope machines.";
+    area = "For the envelope department / WH2, use the thermostat map below and look in the Warehouse 2 / Envelopes area near the envelope machines.";
   } else if (q.includes("wh1") || q.includes("warehouse 1") || q.includes("ink")) {
-    area = "Use the thermostat map on page 1 and look in the Warehouse 1 / Ink Department side of the map.";
+    area = "Use the thermostat map below and look in the Warehouse 1 / Ink Department side of the map.";
   } else if (q.includes("wh3") || q.includes("warehouse 3") || q.includes("prepress") || q.includes("pre-press")) {
-    area = "Use the thermostat map on page 1 and look around Warehouse 3 / Pre-Press / Maintenance.";
+    area = "Use the thermostat map below and look around Warehouse 3 / Pre-Press / Maintenance.";
   } else if (q.includes("wh4") || q.includes("warehouse 4") || q.includes("mailshop") || q.includes("building 4")) {
-    area = "Use the thermostat map on page 1 and look in Warehouse 4 / Mailshop.";
+    area = "Use the thermostat map below and look in Warehouse 4 / Mailshop.";
   } else {
-    area = "Use the thermostat map on page 1 to find the thermostat for that area.";
+    area = "Use the thermostat map below to find the thermostat for that area.";
   }
 
-  return area + "\n\nIf the map is unclear, physically verify or ask supervision/Jonathan." + (mapFile ? linkLine(mapFile) : "");
+  return area + imageLine(HVAC_THERMOSTAT_IMAGE) + "\n\nIf the map is unclear, physically verify or ask supervision/Jonathan.";
 }
 
 function answerMapQuestion(query) {
   const q = lower(query);
-  const mapFile = findPdfByName("facility") || findPdfByName("thermostat") || findPdfByName("map");
 
-  if (q.includes("thermostat")) return answerThermostatQuestion(query);
+  if (q.includes("thermostat") || q.includes("temperature") || q.includes("turn the temperature") || q.includes("turn temperature")) {
+    return answerThermostatQuestion(query);
+  }
 
   if (q.includes("eyewash") || q.includes("eye wash")) {
     return (
-      "Eye wash station locations are shown on page 2 of the facility map.\n\n" +
+      "Eye wash station locations are shown on the map below.\n\n" +
       "If this is an active chemical exposure or injury, follow emergency/safety procedures immediately and notify supervision." +
-      (mapFile ? linkLine(mapFile) : "")
+      imageLine(EYEWASH_IMAGE)
     );
   }
 
   if (q.includes("fire extinguisher") || q.includes("extinguisher")) {
     return (
-      "Fire extinguisher locations are shown on page 3 of the facility map.\n\n" +
+      "Fire extinguisher locations are shown on the map below.\n\n" +
       "If this is an active fire, smoke, or burning smell situation, follow emergency procedures immediately and notify supervision/emergency services as appropriate." +
-      (mapFile ? linkLine(mapFile) : "")
+      imageLine(FIRE_EXTINGUISHER_IMAGE)
     );
   }
 
-  return "I can use the facility maps for thermostat locations, eye wash stations, and fire extinguishers." + (mapFile ? linkLine(mapFile) : "");
+  return (
+    "I can show maps for thermostat locations, eye wash stations, and fire extinguishers.\n\n" +
+    "Try asking: where is the thermostat, where is the eyewash station, or where is the nearest fire extinguisher."
+  );
 }
 
 function answerScheduleQuestion(query) {
@@ -1382,7 +1389,7 @@ function looksLikeNewQuestion(msg) {
   ) return true;
 
   if (isPurchaseOrderPolicyQuestion(q)) return true;
-  if (q.includes("ink") || q.includes("thermostat") || q.includes("eyewash") || q.includes("fire extinguisher")) return true;
+  if (q.includes("ink") || q.includes("thermostat") || q.includes("temperature") || q.includes("eyewash") || q.includes("fire extinguisher")) return true;
 
   return false;
 }
@@ -1401,7 +1408,17 @@ function classifyIntent(msg) {
 
   if (q.includes("2-2-3") || q.includes("schedule") || q.includes("dayshift") || q.includes("day shift") || q.includes("nightshift") || q.includes("night shift")) return "schedule";
 
-  if (q.includes("thermostat") || q.includes("eyewash") || q.includes("eye wash") || q.includes("fire extinguisher") || q.includes("extinguisher") || q.includes("map")) return "map";
+  if (
+    q.includes("thermostat") ||
+    q.includes("temperature") ||
+    q.includes("turn the temperature") ||
+    q.includes("turn temperature") ||
+    q.includes("eyewash") ||
+    q.includes("eye wash") ||
+    q.includes("fire extinguisher") ||
+    q.includes("extinguisher") ||
+    q.includes("map")
+  ) return "map";
 
   if (q.includes("did") && (q.includes("order") || q.includes("ordered"))) return "open_orders";
   if (q.includes("ordered") || q.includes("open order") || q.includes("coming") || q.includes("received yet")) return "open_orders";
@@ -1852,6 +1869,8 @@ function getAskPageHtml() {
     .user { background:var(--blue); color:white; border-bottom-right-radius:6px; }
     .jarvis { background:white; border:1px solid var(--border); border-bottom-left-radius:6px; }
     .system { background:var(--green); border:1px solid var(--green-border); border-bottom-left-radius:6px; }
+    .chat-image { display:block; max-width:100%; height:auto; margin:10px 0 4px; border:1px solid var(--border); border-radius:12px; background:white; cursor:zoom-in; }
+    .image-caption { display:block; font-size:12px; color:#64748b; margin-top:4px; }
     .composer { flex:0 0 auto; background:white; border-top:1px solid var(--border); padding:10px; box-shadow:0 -2px 10px rgba(15,23,42,.06); }
     .name-row { display:flex; gap:8px; margin-bottom:8px; }
     .name-row input { width:100%; border:1px solid var(--border); border-radius:12px; padding:10px 12px; font-size:15px; }
@@ -1905,6 +1924,44 @@ function getAskPageHtml() {
       chat.scrollTop = chat.scrollHeight;
     }
 
+    function isSafeImagePath(src) {
+      return /^\\/kb\\/.+\\.(png|jpg|jpeg|webp)$/i.test(src);
+    }
+
+    function renderMessageContent(container, text) {
+      const lines = String(text).split("\\n");
+
+      lines.forEach((line, index) => {
+        const imageMatch = line.trim().match(/^\\[image:(\\/kb\\/[^\\]]+\\.(?:png|jpg|jpeg|webp))\\]$/i);
+
+        if (imageMatch && isSafeImagePath(imageMatch[1])) {
+          const image = document.createElement("img");
+          image.className = "chat-image";
+          image.src = imageMatch[1];
+          image.alt = "JARVIS map image";
+          image.loading = "lazy";
+          image.onclick = () => window.open(image.src, "_blank");
+
+          image.onerror = () => {
+            image.replaceWith(document.createTextNode("Map image could not load: " + imageMatch[1]));
+          };
+
+          container.appendChild(image);
+
+          const caption = document.createElement("span");
+          caption.className = "image-caption";
+          caption.textContent = "Tap/click the map to open it larger.";
+          container.appendChild(caption);
+        } else {
+          container.appendChild(document.createTextNode(line));
+        }
+
+        if (index < lines.length - 1) {
+          container.appendChild(document.createElement("br"));
+        }
+      });
+    }
+
     function addMessage(text, type) {
       const chat = document.getElementById("chat");
 
@@ -1913,7 +1970,8 @@ function getAskPageHtml() {
 
       const bubble = document.createElement("div");
       bubble.className = "bubble " + type;
-      bubble.textContent = String(text);
+
+      renderMessageContent(bubble, String(text));
 
       wrap.appendChild(bubble);
       chat.appendChild(wrap);
