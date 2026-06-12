@@ -36,92 +36,24 @@ const SENSITIVE_FIELD_PATTERNS = [
 ];
 
 const CATEGORY_HINTS = [
-  {
-    category: "01_PARTS_INVENTORY",
-    terms: ["part", "parts", "bearing", "bin", "inventory", "stock", "do we have", "on hand", "available"]
-  },
-  {
-    category: "02_OPEN_ORDERS",
-    terms: ["ordered", "order", "po", "purchase", "delivery", "received", "vendor", "open order", "coming"]
-  },
-  {
-    category: "03_INK_ROOM",
-    terms: ["ink", "pantone", "pms", "formula", "drawdown", "extender", "inx", "anilox", "waste tote", "color"]
-  },
-  {
-    category: "04_HVAC_AND_BUILDING",
-    terms: ["hvac", "ac", "air conditioning", "thermostat", "cooling", "heat", "pre-press", "prepress"]
-  },
-  {
-    category: "05_KNIVES",
-    terms: ["knife", "knives", "cutoff", "cut-off", "profile", "side knife", "sharpen", "sharpening"]
-  },
-  {
-    category: "06_PURCHASING_PO_REQUESTS",
-    terms: ["po request", "por request", "purchase order request", "blank po", "po form", "por form", "por-richmond"]
-  },
-  {
-    category: "07_MAGNA_REBUILDS",
-    terms: ["magna", "motor", "drive", "rebuild", "repair", "quote"]
-  },
-  {
-    category: "08_MAILSHOP_EQUIPMENT_OUTGOING",
-    terms: ["mailshop", "warehouse 4", "wh4", "building 4", "folder", "stamper", "fire jet", "pickup", "picked up"]
-  },
-  {
-    category: "09_MAPS",
-    terms: ["map", "where", "eyewash", "eye wash", "fire extinguisher", "extinguisher", "thermostat"]
-  },
-  {
-    category: "10_SAFETY_TRAINING",
-    terms: ["safety", "training", "forklift", "certified", "operator", "certification", "clamp truck"]
-  },
-  {
-    category: "11_2-2-3_Schedule",
-    terms: ["2-2-3", "schedule", "dayshift", "day shift", "nightshift", "night shift", "calendar"]
-  }
+  { category: "01_PARTS_INVENTORY", terms: ["part", "parts", "bearing", "bin", "inventory", "stock", "do we have", "on hand", "available"] },
+  { category: "02_OPEN_ORDERS", terms: ["ordered", "order", "po", "purchase", "delivery", "received", "vendor", "open order", "coming"] },
+  { category: "03_INK_ROOM", terms: ["ink", "pantone", "pms", "formula", "drawdown", "extender", "inx", "anilox", "waste tote", "color"] },
+  { category: "04_HVAC_AND_BUILDING", terms: ["hvac", "ac", "air conditioning", "thermostat", "cooling", "heat", "pre-press", "prepress"] },
+  { category: "05_KNIVES", terms: ["knife", "knives", "cutoff", "cut-off", "profile", "side knife", "sharpen", "sharpening"] },
+  { category: "06_PURCHASING_PO_REQUESTS", terms: ["po request", "por request", "purchase order request", "blank po", "po form", "por form", "por-richmond"] },
+  { category: "07_MAGNA_REBUILDS", terms: ["magna", "motor", "drive", "rebuild", "repair", "quote"] },
+  { category: "08_MAILSHOP_EQUIPMENT_OUTGOING", terms: ["mailshop", "warehouse 4", "wh4", "building 4", "folder", "stamper", "fire jet", "pickup", "picked up"] },
+  { category: "09_MAPS", terms: ["map", "where", "eyewash", "eye wash", "fire extinguisher", "extinguisher", "thermostat"] },
+  { category: "10_SAFETY_TRAINING", terms: ["safety", "training", "forklift", "certified", "operator", "certification", "clamp truck"] },
+  { category: "11_2-2-3_Schedule", terms: ["2-2-3", "schedule", "dayshift", "day shift", "nightshift", "night shift", "calendar"] }
 ];
 
 const SEARCH_STOPWORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "as",
-  "at",
-  "be",
-  "by",
-  "can",
-  "could",
-  "do",
-  "does",
-  "for",
-  "from",
-  "have",
-  "how",
-  "i",
-  "in",
-  "is",
-  "it",
-  "me",
-  "need",
-  "of",
-  "on",
-  "or",
-  "our",
-  "please",
-  "send",
-  "the",
-  "there",
-  "this",
-  "to",
-  "we",
-  "what",
-  "when",
-  "where",
-  "who",
-  "with",
-  "you"
+  "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do", "does",
+  "for", "from", "have", "how", "i", "in", "is", "it", "me", "need", "of", "on",
+  "or", "our", "please", "send", "the", "there", "this", "to", "we", "what",
+  "when", "where", "who", "with", "you"
 ]);
 
 function normalize(text) {
@@ -166,12 +98,8 @@ function walkFiles(dir) {
 
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
-
-    if (entry.isDirectory()) {
-      files.push(...walkFiles(fullPath));
-    } else {
-      files.push(fullPath);
-    }
+    if (entry.isDirectory()) files.push(...walkFiles(fullPath));
+    else files.push(fullPath);
   }
 
   return files;
@@ -345,13 +273,9 @@ function loadKnowledgeBase() {
       const ext = getFileType(filePath);
 
       try {
-        if (["md", "txt"].includes(ext)) {
-          loadMarkdownFile(filePath);
-        } else if (["xlsx", "xls"].includes(ext)) {
-          loadWorkbookFile(filePath);
-        } else if (ext === "pdf") {
-          loadPdfFile(filePath);
-        }
+        if (["md", "txt"].includes(ext)) loadMarkdownFile(filePath);
+        else if (["xlsx", "xls"].includes(ext)) loadWorkbookFile(filePath);
+        else if (ext === "pdf") loadPdfFile(filePath);
       } catch (error) {
         console.error(`Failed to load ${rel}:`, error);
 
@@ -422,14 +346,12 @@ function hasExplicitKnifeLanguage(query) {
 
 function looksLikePartNumber(query) {
   const q = normalize(query);
-
   if (!q) return false;
 
   const tokens = q.match(/[A-Za-z0-9][A-Za-z0-9._\-/]{1,}[A-Za-z0-9]/g) || [];
 
   for (const token of tokens) {
     const normalized = normalizePart(token);
-
     if (normalized.length < 3) continue;
 
     const hasLetter = /[A-Z]/.test(normalized);
@@ -437,21 +359,32 @@ function looksLikePartNumber(query) {
     const hasSeparator = /[._\-/]/.test(token);
 
     if (hasLetter && hasDigit) return true;
-
     if (hasSeparator && hasDigit && normalized.length >= 4) return true;
   }
 
   const lowerQ = lower(query);
 
-  if (/\b\d{3,6}\s*(zz|z|rs|c3|c4|2rs|rsr|llu|llb)\b/i.test(lowerQ)) {
-    return true;
-  }
-
-  if (/\b(k|v|p|m|a|b|c|d|db|wd|w)\s*\.?\s*\d{2,}[\d.a-z\-\/]*\b/i.test(lowerQ)) {
-    return true;
-  }
+  if (/\b\d{3,6}\s*(zz|z|rs|c3|c4|2rs|rsr|llu|llb)\b/i.test(lowerQ)) return true;
+  if (/\b(k|v|p|m|a|b|c|d|db|wd|w)\s*\.?\s*\d{2,}[\d.a-z\-\/]*\b/i.test(lowerQ)) return true;
 
   return false;
+}
+
+function extractCandidatePartNumber(query) {
+  const tokens = normalize(query).match(/[A-Za-z0-9][A-Za-z0-9._\-/]{1,}[A-Za-z0-9]/g) || [];
+
+  for (const token of tokens) {
+    const normalized = normalizePart(token);
+    if (normalized.length < 3) continue;
+
+    const hasLetter = /[A-Z]/.test(normalized);
+    const hasDigit = /\d/.test(normalized);
+    const hasSeparator = /[._\-/]/.test(token);
+
+    if ((hasLetter && hasDigit) || (hasSeparator && hasDigit)) return token;
+  }
+
+  return "";
 }
 
 function categoriesForQuery(query) {
@@ -459,22 +392,16 @@ function categoriesForQuery(query) {
   const categories = new Set();
 
   for (const hint of CATEGORY_HINTS) {
-    if (hint.terms.some((term) => q.includes(term))) {
-      categories.add(hint.category);
-    }
+    if (hint.terms.some((term) => q.includes(term))) categories.add(hint.category);
   }
 
-  if (looksLikePartNumber(q) && !hasExplicitKnifeLanguage(q)) {
-    categories.add("01_PARTS_INVENTORY");
-  }
+  if (looksLikePartNumber(q) && !hasExplicitKnifeLanguage(q)) categories.add("01_PARTS_INVENTORY");
 
   if (q.includes("where") || q.includes("thermostat") || q.includes("eyewash") || q.includes("fire extinguisher")) {
     categories.add("09_MAPS");
   }
 
-  if (q.includes("ink") || q.includes("pms") || q.includes("pantone")) {
-    categories.add("03_INK_ROOM");
-  }
+  if (q.includes("ink") || q.includes("pms") || q.includes("pantone")) categories.add("03_INK_ROOM");
 
   if (q.includes("po") || q.includes("por") || q.includes("ordered") || q.includes("order")) {
     categories.add("02_OPEN_ORDERS");
@@ -490,19 +417,13 @@ function categoryBoost(query, category) {
 
   for (const hint of CATEGORY_HINTS) {
     if (hint.category !== category) continue;
-
     for (const term of hint.terms) {
       if (q.includes(term)) boost += 15;
     }
   }
 
-  if (category === "01_PARTS_INVENTORY" && looksLikePartNumber(query) && !hasExplicitKnifeLanguage(query)) {
-    boost += 60;
-  }
-
-  if (category === "05_KNIVES" && !hasExplicitKnifeLanguage(query)) {
-    boost -= 80;
-  }
+  if (category === "01_PARTS_INVENTORY" && looksLikePartNumber(query) && !hasExplicitKnifeLanguage(query)) boost += 60;
+  if (category === "05_KNIVES" && !hasExplicitKnifeLanguage(query)) boost -= 80;
 
   return boost;
 }
@@ -658,7 +579,6 @@ function makeExcerpt(body, query, maxLen = 700) {
     .filter((term) => term.length > 3 && !SEARCH_STOPWORDS.has(term));
 
   const lowerText = text.toLowerCase();
-
   let idx = -1;
 
   for (const term of qTerms) {
@@ -842,19 +762,14 @@ function answerPartSearchResults(query, results) {
   const top = results[0];
   const confidence = getPartMatchConfidence(query, top);
 
-  if (confidence === "exact") {
-    return answerPartsRow(top);
-  }
-
-  if (confidence === "likely") {
-    return "I found a likely match:\n\n" + answerPartsRow(top);
-  }
+  if (confidence === "exact") return answerPartsRow(top);
+  if (confidence === "likely") return "I found a likely match:\n\n" + answerPartsRow(top);
 
   return (
     "I did not find an exact match for that part number.\n\n" +
     "I found one possible loose match, but I am not confident it is the same part:\n\n" +
     answerPartsRow(top) +
-    "\n\nIf this is not the item you meant, I should treat your original part number as not found."
+    "\n\nIf this is not the item you meant, say: that is not the right part."
   );
 }
 
@@ -996,9 +911,7 @@ function answerGenericSpreadsheetRow(top) {
     lines.push(`${key}: ${value}`);
   }
 
-  if (!lines.length) {
-    return "I found a matching record, but it does not have enough clean fields to summarize clearly.";
-  }
+  if (!lines.length) return "I found a matching record, but it does not have enough clean fields to summarize clearly.";
 
   return lines.slice(0, 6).join("\n");
 }
@@ -1027,11 +940,8 @@ function answerFromTopResults(query, results) {
 
   if (top.type === "file") {
     let reply = `I found the relevant file: ${top.title}.`;
-
     if (top.url) reply += `\n\nOpen file: ${top.url}`;
-
     reply += "\n\nPlease verify the exact details in the file before relying on it.";
-
     return reply;
   }
 
@@ -1049,9 +959,7 @@ function answerPoRequest() {
     "POR means Purchase Order Request / PO Request.\n\n" +
     "Important: JARVIS cannot approve purchases, create POs, or say something has been ordered unless the approved order records clearly confirm it.";
 
-  if (form) {
-    reply += "\n\nBlank PO Request Form:\n" + form.url;
-  }
+  if (form) reply += "\n\nBlank PO Request Form:\n" + form.url;
 
   return reply;
 }
@@ -1092,11 +1000,7 @@ function answerThermostatQuestion(query) {
     area = "Use the thermostat map on page 1 to find the thermostat for that area.";
   }
 
-  return (
-    area +
-    "\n\nIf the map is unclear, physically verify or ask supervision/Jonathan." +
-    (mapFile ? linkLine(mapFile) : "")
-  );
+  return area + "\n\nIf the map is unclear, physically verify or ask supervision/Jonathan." + (mapFile ? linkLine(mapFile) : "");
 }
 
 function answerMapQuestion(query) {
@@ -1121,10 +1025,7 @@ function answerMapQuestion(query) {
     );
   }
 
-  return (
-    "I can use the facility maps for thermostat locations, eye wash stations, and fire extinguishers." +
-    (mapFile ? linkLine(mapFile) : "")
-  );
+  return "I can use the facility maps for thermostat locations, eye wash stations, and fire extinguishers." + (mapFile ? linkLine(mapFile) : "");
 }
 
 function answerScheduleQuestion(query) {
@@ -1175,9 +1076,7 @@ function answerInkQuestion(query) {
     if (exact) return answerInkInventoryRow(exact);
   }
 
-  if (spreadsheetResults.length) {
-    return answerInkInventoryRow(spreadsheetResults[0]);
-  }
+  if (spreadsheetResults.length) return answerInkInventoryRow(spreadsheetResults[0]);
 
   const guidanceResults = searchKnowledge(query, {
     maxResults: 3,
@@ -1186,26 +1085,53 @@ function answerInkQuestion(query) {
     minScore: 25
   });
 
-  if (guidanceResults.length) {
-    return answerFromTopResults(query, guidanceResults);
-  }
+  if (guidanceResults.length) return answerFromTopResults(query, guidanceResults);
 
   return "I could not find that ink in the current JARVIS ink files. Please physically verify or ask Jonathan/INX if this affects production.";
 }
 
-function answerPartsLookup(query) {
+function answerPartsLookup(query, context = {}) {
   const results = searchKnowledge(query, {
     maxResults: 6,
     categories: ["01_PARTS_INVENTORY"],
     minScore: looksLikePartNumber(query) ? 55 : 80
   });
 
-  if (results.length) return answerPartSearchResults(query, results);
+  const candidatePartNumber = extractCandidatePartNumber(query) || query;
 
-  return (
-    "I could not find that part in the current JARVIS parts inventory.\n\n" +
-    "Would you like me to add it to Jonathan's Purchase Order Request list?"
-  );
+  if (!results.length) {
+    if (context.from) {
+      pendingRequests.set(context.from, {
+        step: "confirm_add_missing_part",
+        requesterName: context.requesterName || "",
+        requesterPhone: context.from,
+        partNumber: candidatePartNumber,
+        partDescription: "",
+        originalQuery: query
+      });
+    }
+
+    return (
+      "I could not find that part in the current JARVIS parts inventory.\n\n" +
+      "Would you like me to add it to Jonathan's Purchase Order Request list?"
+    );
+  }
+
+  const confidence = getPartMatchConfidence(query, results[0]);
+
+  if (confidence === "weak" && context.from) {
+    pendingRequests.set(context.from, {
+      step: "possible_part_match",
+      requesterName: context.requesterName || "",
+      requesterPhone: context.from,
+      partNumber: candidatePartNumber,
+      partDescription: "",
+      originalQuery: query,
+      possibleMatchSummary: answerPartsRow(results[0])
+    });
+  }
+
+  return answerPartSearchResults(query, results);
 }
 
 function answerOpenOrdersLookup(query) {
@@ -1296,11 +1222,7 @@ function isPurchaseOrderPolicyQuestion(msg) {
     msg.includes("how do i request a por") ||
     (
       msg.includes("request form") &&
-      (
-        msg.includes("po") ||
-        msg.includes("por") ||
-        msg.includes("purchase")
-      )
+      (msg.includes("po") || msg.includes("por") || msg.includes("purchase"))
     )
   );
 }
@@ -1318,12 +1240,7 @@ function isPartOrderingProcessQuestion(msg) {
       msg.includes("request a part") ||
       msg.includes("add a part")
     ) &&
-    (
-      msg.includes("part") ||
-      msg.includes("parts") ||
-      msg.includes("bearing") ||
-      msg.includes("item")
-    )
+    (msg.includes("part") || msg.includes("parts") || msg.includes("bearing") || msg.includes("item"))
   );
 }
 
@@ -1346,7 +1263,40 @@ function isCancelIntent(msg) {
     q === "start over" ||
     q === "new question" ||
     q === "clear" ||
-    q === "reset"
+    q === "reset" ||
+    q === "no" ||
+    q === "nope"
+  );
+}
+
+function isYesIntent(msg) {
+  const q = lower(msg);
+  return (
+    q === "yes" ||
+    q === "y" ||
+    q === "yeah" ||
+    q === "yep" ||
+    q === "please" ||
+    q === "please do" ||
+    q === "add it" ||
+    q === "add this" ||
+    q === "do it" ||
+    q === "go ahead" ||
+    q.includes("yes add") ||
+    q.includes("please add")
+  );
+}
+
+function isWrongPartIntent(msg) {
+  const q = lower(msg);
+  return (
+    q.includes("not the right part") ||
+    q.includes("wrong part") ||
+    q.includes("not right") ||
+    q.includes("not it") ||
+    q.includes("not the same") ||
+    q.includes("that is not") ||
+    q.includes("that's not")
   );
 }
 
@@ -1369,9 +1319,7 @@ function looksLikeDueDateOrUrgency(msg) {
     q.includes("next friday") ||
     q.includes("next saturday") ||
     q.includes("next sunday")
-  ) {
-    return true;
-  }
+  ) return true;
 
   if (/\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b/.test(q)) return true;
   if (/\b\d{4}-\d{2}-\d{2}\b/.test(q)) return true;
@@ -1427,9 +1375,7 @@ function looksLikeNewQuestion(msg) {
     q.startsWith("how do i request") ||
     q.startsWith("request a po") ||
     q.startsWith("request a por")
-  ) {
-    return true;
-  }
+  ) return true;
 
   if (isPurchaseOrderPolicyQuestion(q)) return true;
   if (q.includes("ink") || q.includes("thermostat") || q.includes("eyewash") || q.includes("fire extinguisher")) return true;
@@ -1445,44 +1391,28 @@ function classifyIntent(msg) {
   if (isPurchaseOrderPolicyQuestion(q)) return "po_policy";
   if (isPartOrderingProcessQuestion(q)) return "part_ordering_process";
 
-  if (q.includes("ink") || q.includes("pantone") || q.includes("pms") || q.includes("drawdown") || q.includes("extender") || q.includes("inx")) {
-    return "ink";
-  }
+  if (q.includes("ink") || q.includes("pantone") || q.includes("pms") || q.includes("drawdown") || q.includes("extender") || q.includes("inx")) return "ink";
 
   if (isPartRequestStart(q)) return "part_request_start";
 
-  if (q.includes("2-2-3") || q.includes("schedule") || q.includes("dayshift") || q.includes("day shift") || q.includes("nightshift") || q.includes("night shift")) {
-    return "schedule";
-  }
+  if (q.includes("2-2-3") || q.includes("schedule") || q.includes("dayshift") || q.includes("day shift") || q.includes("nightshift") || q.includes("night shift")) return "schedule";
 
-  if (q.includes("thermostat") || q.includes("eyewash") || q.includes("eye wash") || q.includes("fire extinguisher") || q.includes("extinguisher") || q.includes("map")) {
-    return "map";
-  }
+  if (q.includes("thermostat") || q.includes("eyewash") || q.includes("eye wash") || q.includes("fire extinguisher") || q.includes("extinguisher") || q.includes("map")) return "map";
 
   if (q.includes("did") && (q.includes("order") || q.includes("ordered"))) return "open_orders";
   if (q.includes("ordered") || q.includes("open order") || q.includes("coming") || q.includes("received yet")) return "open_orders";
 
   if (q.includes("magna") || q.includes("motor") || q.includes("drive") || q.includes("rebuild")) return "magna";
 
-  if (q.includes("warehouse 4") || q.includes("wh4") || q.includes("mailshop") || q.includes("building 4") || q.includes("stamper") || q.includes("fire jet") || q.includes("picked up") || q.includes("pickup")) {
-    return "mailshop";
-  }
+  if (q.includes("warehouse 4") || q.includes("wh4") || q.includes("mailshop") || q.includes("building 4") || q.includes("stamper") || q.includes("fire jet") || q.includes("picked up") || q.includes("pickup")) return "mailshop";
 
-  if (q.includes("forklift") || q.includes("certified") || q.includes("operator") || q.includes("certification") || q.includes("clamp truck") || q.includes("training")) {
-    return "safety";
-  }
+  if (q.includes("forklift") || q.includes("certified") || q.includes("operator") || q.includes("certification") || q.includes("clamp truck") || q.includes("training")) return "safety";
 
-  if (hasExplicitKnifeLanguage(q)) {
-    return "knives";
-  }
+  if (hasExplicitKnifeLanguage(q)) return "knives";
 
-  if (looksLikePartNumber(q)) {
-    return "parts_lookup";
-  }
+  if (looksLikePartNumber(q)) return "parts_lookup";
 
-  if (q.includes("do we have") || q.includes("where is") || q.includes("looking for") || q.includes("find") || q.includes("on hand") || q.includes("available") || q.includes("part")) {
-    return "parts_lookup";
-  }
+  if (q.includes("do we have") || q.includes("where is") || q.includes("looking for") || q.includes("find") || q.includes("on hand") || q.includes("available") || q.includes("part")) return "parts_lookup";
 
   return "fallback";
 }
@@ -1491,25 +1421,10 @@ function isHighPriorityDueDate(dueDateText) {
   const text = lower(dueDateText);
 
   const urgentPhrases = [
-    "asap",
-    "urgent",
-    "today",
-    "tomorrow",
-    "this week",
-    "next week",
-    "within 2 weeks",
-    "within two weeks",
-    "down machine",
-    "machine down",
-    "cannot run",
-    "production stopped",
-    "next monday",
-    "next tuesday",
-    "next wednesday",
-    "next thursday",
-    "next friday",
-    "next saturday",
-    "next sunday"
+    "asap", "urgent", "today", "tomorrow", "this week", "next week",
+    "within 2 weeks", "within two weeks", "down machine", "machine down",
+    "cannot run", "production stopped", "next monday", "next tuesday",
+    "next wednesday", "next thursday", "next friday", "next saturday", "next sunday"
   ];
 
   if (urgentPhrases.some((phrase) => text.includes(phrase))) return true;
@@ -1590,8 +1505,77 @@ async function writePartsRequestToSheet(request) {
   }
 }
 
+function startMissingPartRequestFromPending(from, pending, requesterName) {
+  pendingRequests.set(from, {
+    step: "awaiting_due_date",
+    requesterName: pending.requesterName || requesterName || "",
+    requesterPhone: from,
+    partNumber: pending.partNumber || pending.originalQuery || "",
+    partDescription: pending.partDescription || "",
+    quantityRequested: "",
+    notes: pending.originalQuery || pending.partNumber || ""
+  });
+
+  return (
+    "Okay. I can add this to Jonathan's next Purchase Order Request list.\n\n" +
+    "Part Number: " + (pending.partNumber || pending.originalQuery || "Not provided") + "\n" +
+    "Description: " + (pending.partDescription || "Not provided") + "\n\n" +
+    "What requested due date should I use?\n\n" +
+    "Examples: 6/20, next Friday, ASAP, or within 2 weeks.\n\n" +
+    "Type cancel if you do not want to create this request."
+  );
+}
+
 async function handlePendingRequest({ pending, from, cleanBody, requesterName }) {
   const msg = lower(cleanBody);
+
+  if (pending.step === "possible_part_match") {
+    if (isWrongPartIntent(msg)) {
+      pendingRequests.set(from, {
+        ...pending,
+        step: "confirm_add_missing_part"
+      });
+
+      return (
+        "Got it. I will treat the original part as not found:\n\n" +
+        (pending.partNumber || pending.originalQuery || "Original part not provided") +
+        "\n\nWould you like me to add it to Jonathan's Purchase Order Request list?"
+      );
+    }
+
+    if (isYesIntent(msg)) {
+      pendingRequests.delete(from);
+      return "Okay — please physically verify that possible match before relying on it for production. If you want me to add the original part instead, say: not the right part.";
+    }
+
+    if (isCancelIntent(msg)) {
+      pendingRequests.delete(from);
+      return "Okay — I cleared that possible part match. What can I help you with?";
+    }
+
+    if (looksLikeNewQuestion(cleanBody)) {
+      pendingRequests.delete(from);
+      const reply = await getJarvisReply({ from, body: cleanBody, requesterName });
+      return "I cleared the previous possible part match and answered your new question instead.\n\n" + reply;
+    }
+  }
+
+  if (pending.step === "confirm_add_missing_part") {
+    if (isYesIntent(msg)) return startMissingPartRequestFromPending(from, pending, requesterName);
+
+    if (isCancelIntent(msg)) {
+      pendingRequests.delete(from);
+      return "Okay — I will not add that part request. What can I help you with?";
+    }
+
+    if (looksLikeNewQuestion(cleanBody)) {
+      pendingRequests.delete(from);
+      const reply = await getJarvisReply({ from, body: cleanBody, requesterName });
+      return "I cleared the pending add-part offer and answered your new question instead.\n\n" + reply;
+    }
+
+    return "Please answer yes to add the missing part to Jonathan's Purchase Order Request list, or type cancel.";
+  }
 
   if (isCancelIntent(msg)) {
     pendingRequests.delete(from);
@@ -1719,8 +1703,9 @@ async function handlePendingRequest({ pending, from, cleanBody, requesterName })
 
 async function startPartRequest({ from, cleanBody, requesterName }) {
   const info = extractSimplePartInfo(cleanBody);
+  const partNumber = info.partNumber || extractCandidatePartNumber(cleanBody);
 
-  const lookupResults = searchKnowledge(info.partNumber || cleanBody, {
+  const lookupResults = searchKnowledge(partNumber || cleanBody, {
     maxResults: 3,
     categories: ["01_PARTS_INVENTORY"],
     minScore: 55
@@ -1729,17 +1714,17 @@ async function startPartRequest({ from, cleanBody, requesterName }) {
   let foundNote = "";
 
   if (lookupResults.length) {
-    const confidence = getPartMatchConfidence(info.partNumber || cleanBody, lookupResults[0]);
+    const confidence = getPartMatchConfidence(partNumber || cleanBody, lookupResults[0]);
 
     if (confidence === "exact" || confidence === "likely") {
       foundNote =
         "Before I add the request, it looks like we may already have this:\n\n" +
-        answerPartSearchResults(info.partNumber || cleanBody, lookupResults) +
+        answerPartSearchResults(partNumber || cleanBody, lookupResults) +
         "\n\n";
     } else {
       foundNote =
         "Before I add the request, I found one loose possible match, but I am not confident it is the same part:\n\n" +
-        answerPartSearchResults(info.partNumber || cleanBody, lookupResults) +
+        answerPartSearchResults(partNumber || cleanBody, lookupResults) +
         "\n\n";
     }
   }
@@ -1748,7 +1733,7 @@ async function startPartRequest({ from, cleanBody, requesterName }) {
     step: "awaiting_due_date",
     requesterName,
     requesterPhone: from,
-    partNumber: info.partNumber,
+    partNumber: partNumber || info.partNumber,
     partDescription: info.partDescription,
     quantityRequested: "",
     notes: cleanBody
@@ -1757,7 +1742,7 @@ async function startPartRequest({ from, cleanBody, requesterName }) {
   return (
     foundNote +
     "I can add this to Jonathan's next Purchase Order Request list.\n\n" +
-    "Part Number: " + (info.partNumber || "Not provided") + "\n" +
+    "Part Number: " + (partNumber || info.partNumber || "Not provided") + "\n" +
     "Description: " + (info.partDescription || "Not provided") + "\n\n" +
     "What requested due date should I use?\n\n" +
     "Examples: 6/20, next Friday, ASAP, or within 2 weeks.\n\n" +
@@ -1823,7 +1808,7 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
       return answerSafetyLookup(cleanBody);
 
     case "parts_lookup":
-      return answerPartsLookup(cleanBody);
+      return answerPartsLookup(cleanBody, { from, requesterName });
 
     default: {
       const results = searchKnowledge(cleanBody, { maxResults: 5, minScore: 50 });
