@@ -923,7 +923,7 @@ function getAskPageHtml() {
         if (!response.ok) throw new Error(data.error || "Request failed");
         addMessage(data.reply, "jarvis");
       } catch (error) {
-        addMessage("I had a problem answering that. Jonathan needs to check the JARVIS logs.\n\nError: " + error.message, "system");
+        addMessage("I had a problem answering that. Jonathan needs to check the JARVIS logs.\\n\\nError: " + error.message, "system");
       } finally {
         button.disabled = false; button.textContent = "Ask"; questionInput.focus(); scrollChatToBottom();
       }
