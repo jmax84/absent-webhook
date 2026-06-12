@@ -184,6 +184,7 @@ function loadWorkbookFile(filePath) {
   const workbook = XLSX.readFile(filePath, { cellDates: true });
 
   for (const sheetName of workbook.SheetNames) {
+        if (/^README$/i.test(sheetName)) continue;
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
 
