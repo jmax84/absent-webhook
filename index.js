@@ -466,6 +466,163 @@ function answerPoRequest() {
   );
 }
 
+function getField(fields, names) {
+  const entries = Object.entries(fields || {});
+  const wanted = names.map((name) => lower(name));
+
+  for (const [key, value] of entries) {
+    if (wanted.includes(lower(key))) return normalize(value);
+  }
+
+  for (const [key, value] of entries) {
+    const keyNorm = lower(key).replace(/[^a-z0-9]/g, "");
+    for (const name of wanted) {
+      const nameNorm = name.replace(/[^a-z0-9]/g, "");
+      if (keyNorm === nameNorm) return normalize(value);
+    }
+  }
+
+  return "";
+}
+
+function isBlankOrZero(value) {
+  const clean = normalize(value);
+  if (!clean) return true;
+  const number = Number(clean.replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(number) && number <= 0;
+}
+
+function answerInkInventoryRow(top) {
+  const fields = top.fields || {};
+
+  const color =
+    getField(fields, ["Ink Color Number", "Color", "Pantone", "PMS"]) ||
+    getField(fields, ["Formula Number"]) ||
+    "that ink";
+
+  const totalWeight = getField(fields, ["Total Weight lb", "Weight lb", "Weight", "Total Weight"]);
+  const containerCount = getField(fields, ["Container Count", "Containers", "Count"]);
+  const lastCountDate = getField(fields, ["Last Count Date", "Date Entered", "Count Date", "Last Updated"]);
+  const location = getField(fields, ["Location", "Bin", "Shelf"]);
+  const status = getField(fields, ["Status"]);
+
+  if (isBlankOrZero(totalWeight) && isBlankOrZero(containerCount)) {
+    let reply = `I found ink ${color}, but the current snapshot does not show a clear usable quantity.`;
+
+    if (status) reply += `\n\nStatus: ${status}`;
+    if (lastCountDate) reply += `\nLast counted: ${lastCountDate}`;
+
+    reply += "\n\nPlease physically verify before relying on it for production.";
+    return reply;
+  }
+
+  let reply = `Yes — ink ${color} is listed on hand.`;
+
+  if (totalWeight) reply += `\n\nTotal: ${totalWeight} lb`;
+  if (containerCount) reply += `\nContainers: ${containerCount}`;
+  if (location) reply += `\nLocation: ${location}`;
+  if (lastCountDate) reply += `\nLast counted: ${lastCountDate}`;
+
+  reply += "\n\nPlease physically verify before relying on it for production.";
+
+  return reply;
+}
+
+function answerPartsRow(top) {
+  const fields = top.fields || {};
+
+  const partNumber =
+    getField(fields, ["Part Number", "Item Number", "Part", "Item", "Number"]) ||
+    getField(fields, ["Normalized Search Key"]);
+
+  const description = getField(fields, ["Description", "Part Description", "Item Description"]);
+  const quantity = getField(fields, ["Quantity On Hand", "Qty On Hand", "Quantity", "Qty", "On Hand"]);
+  const location = getField(fields, ["Location", "Bin", "Shelf", "Cabinet"]);
+  const machine = getField(fields, ["Machine", "Machine / Area", "Area"]);
+  const status = getField(fields, ["Status"]);
+
+  let reply = "I found a matching part.";
+
+  if (partNumber || description) {
+    reply = `I found ${partNumber || "a matching part"}${description ? " — " + description : ""}.`;
+  }
+
+  if (quantity) reply += `\n\nQuantity on hand: ${quantity}`;
+  if (location) reply += `\nLocation: ${location}`;
+  if (machine) reply += `\nMachine / Area: ${machine}`;
+  if (status) reply += `\nStatus: ${status}`;
+
+  reply += "\n\nPlease physically verify before relying on it for production.";
+
+  return reply;
+}
+
+function answerKnifeRow(top) {
+  const fields = top.fields || {};
+
+  const knifeId =
+    getField(fields, ["Knife ID", "Knife Number", "Knife", "Item Number", "Part Number"]) ||
+    getField(fields, ["Number"]);
+
+  const type = getField(fields, ["Knife Type", "Type"]);
+  const status = getField(fields, ["Status", "Current Status"]);
+  const location = getField(fields, ["Location", "Current Location"]);
+  const timesSent = getField(fields, ["Times Sent Out", "Sharpen Count", "Sharpening Count", "Sent Out Count"]);
+  const notes = getField(fields, ["Notes"]);
+
+  let reply = `I found ${knifeId || "a matching knife"}${type ? " — " + type : ""}.`;
+
+  if (status) reply += `\n\nStatus: ${status}`;
+  if (location) reply += `\nLocation: ${location}`;
+  if (timesSent) reply += `\nTimes sent out for sharpening: ${timesSent}`;
+  if (notes) reply += `\nNotes: ${notes}`;
+
+  reply += "\n\nPlease physically verify before relying on it for production.";
+
+  return reply;
+}
+
+function answerMailshopRow(top) {
+  const fields = top.fields || {};
+
+  const item =
+    getField(fields, ["Item", "Equipment", "Machine", "Description", "Name"]) ||
+    "that item";
+
+  const status = getField(fields, ["Status"]);
+  const destination = getField(fields, ["Destination"]);
+  const serial = getField(fields, ["Serial Number", "Serial"]);
+  const model = getField(fields, ["Model Number", "Model"]);
+  const notes = getField(fields, ["Notes"]);
+
+  let reply = `I found ${item} in the Warehouse 4 / Mailshop equipment list.`;
+
+  if (status) reply += `\n\nStatus: ${status}`;
+  if (destination) reply += `\nDestination: ${destination}`;
+  if (model) reply += `\nModel: ${model}`;
+  if (serial) reply += `\nSerial: ${serial}`;
+  if (notes) reply += `\nNotes: ${notes}`;
+
+  reply += "\n\nPlease physically verify before relying on this for pickup/staging decisions.";
+
+  return reply;
+}
+
+function answerGenericSpreadsheetRow(top) {
+  const fields = safeFields(top.fields || {});
+  const lines = [];
+
+  for (const [key, value] of Object.entries(fields)) {
+    lines.push(`${key}: ${value}`);
+  }
+
+  if (!lines.length) {
+    return "I found a matching record, but it does not have enough clean fields to summarize clearly.";
+  }
+
+  return lines.slice(0, 6).join("\n");
+}
+
 function answerFromTopResults(query, results) {
   if (!results.length) {
     return (
@@ -473,6 +630,43 @@ function answerFromTopResults(query, results) {
       "I should not guess. Try giving me a part number, machine/area, vendor name, ink color, PO/order clue, or location keyword."
     );
   }
+
+  const top = results[0];
+
+  if (top.type === "spreadsheet-row") {
+    if (top.category === "03_INK_ROOM") {
+      return answerInkInventoryRow(top);
+    }
+
+    if (top.category === "01_PARTS_INVENTORY") {
+      return answerPartsRow(top);
+    }
+
+    if (top.category === "05_KNIVES") {
+      return answerKnifeRow(top);
+    }
+
+    if (top.category === "08_MAILSHOP_EQUIPMENT_OUTGOING") {
+      return answerMailshopRow(top);
+    }
+
+    return answerGenericSpreadsheetRow(top);
+  }
+
+  if (top.type === "file") {
+    let reply = `I found the relevant file: ${top.title}.`;
+
+    if (top.url) {
+      reply += `\n\nOpen file: ${top.url}`;
+    }
+
+    reply += "\n\nPlease verify the exact details in the file before relying on it.";
+
+    return reply;
+  }
+
+  return makeExcerpt(top.body, query, 650) + linkLine(top);
+}
 
   const top = results[0];
 
