@@ -26,9 +26,10 @@ const HVAC_THERMOSTAT_IMAGE = "/kb/04_HVAC_AND_BUILDING/HVAC_thermostat_location
 const EYEWASH_IMAGE = "/kb/04_HVAC_AND_BUILDING/FACILITY_eye_wash_stations.png";
 const FIRE_EXTINGUISHER_IMAGE = "/kb/04_HVAC_AND_BUILDING/FACILITY_fire_extinguishers.png";
 
-const JONATHAN_AWAY_START = "Thursday evening, June 26, 2026";
+const JONATHAN_AWAY_START = "Friday evening, June 26, 2026";
 const JONATHAN_TRAVEL_NOTE = "Jonathan is flying to Portland, Oregon on the evening of June 26.";
 const JONATHAN_RETURN = "Monday morning, July 6, 2026";
+const JONATHAN_PHONE_FALLBACK = "360-953-1794";
 
 const SENSITIVE_FIELD_PATTERNS = [
   /cost/i,
@@ -909,6 +910,21 @@ function getJonathanPhoneNumber() {
   const doc = getJonathanStatusDocument();
   const body = doc?.body || "";
 
+  const phoneMatch = body.match(/(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
+
+  if (phoneMatch) {
+    const phone = normalize(phoneMatch[0]);
+
+    if (!phone.includes("[") && !phone.toLowerCase().includes("enter")) {
+      return phone;
+    }
+  }
+
+  return JONATHAN_PHONE_FALLBACK;
+}
+  const doc = getJonathanStatusDocument();
+  const body = doc?.body || "";
+
   const lineMatch = body.match(/Jonathan'?s phone number:\*\*\s*([^\n\r]+)/i);
   const candidateLine = lineMatch ? lineMatch[1] : body;
 
@@ -1287,6 +1303,34 @@ function answerPartOrderingProcess() {
 }
 
 function answerJonathanStatusQuestion(query) {
+  const q = lower(query);
+  const phone = getJonathanPhoneNumber();
+
+  let reply =
+    "Jonathan is leaving " + JONATHAN_AWAY_START + " and is expected back " + JONATHAN_RETURN + ".\n\n" +
+    JONATHAN_TRAVEL_NOTE;
+
+  if (phone) {
+    reply += "\n\nIf this is urgent or you need Jonathan directly, he can be reached by call or text at " + phone + ".";
+  } else {
+    reply += "\n\nIf this is urgent, notify supervision. Jonathan's phone number has not been filled into the JARVIS contact file yet.";
+  }
+
+  if (
+    q.includes("phone") ||
+    q.includes("number") ||
+    q.includes("contact") ||
+    q.includes("call") ||
+    q.includes("text") ||
+    q.includes("reach")
+  ) {
+    // Phone/contact question already answered above.
+  } else {
+    reply += "\n\nFor normal parts requests, PO/POR questions, inventory checks, ink questions, maps, and routine issues, JARVIS can help capture or answer the question here.";
+  }
+
+  return reply;
+}
   const q = lower(query);
   const phone = getJonathanPhoneNumber();
 
