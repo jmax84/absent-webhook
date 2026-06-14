@@ -26,6 +26,10 @@ const HVAC_THERMOSTAT_IMAGE = "/kb/04_HVAC_AND_BUILDING/HVAC_thermostat_location
 const EYEWASH_IMAGE = "/kb/04_HVAC_AND_BUILDING/FACILITY_eye_wash_stations.png";
 const FIRE_EXTINGUISHER_IMAGE = "/kb/04_HVAC_AND_BUILDING/FACILITY_fire_extinguishers.png";
 
+const JONATHAN_AWAY_START = "Thursday evening, June 26, 2026";
+const JONATHAN_TRAVEL_NOTE = "Jonathan is flying to Portland, Oregon on the evening of June 26.";
+const JONATHAN_RETURN = "Monday morning, July 6, 2026";
+
 const SENSITIVE_FIELD_PATTERNS = [
   /cost/i,
   /unit\s*price/i,
@@ -40,6 +44,7 @@ const SENSITIVE_FIELD_PATTERNS = [
 ];
 
 const CATEGORY_HINTS = [
+  { category: "00_START_HERE", terms: ["jonathan", "vacation", "back", "return", "phone", "contact", "call", "text"] },
   { category: "01_PARTS_INVENTORY", terms: ["part", "parts", "bearing", "bin", "inventory", "stock", "do we have", "on hand", "available"] },
   { category: "02_OPEN_ORDERS", terms: ["ordered", "order", "po", "purchase", "delivery", "received", "vendor", "open order", "coming"] },
   { category: "03_INK_ROOM", terms: ["ink", "pantone", "pms", "formula", "drawdown", "extender", "inx", "anilox", "waste tote", "color"] },
@@ -613,6 +618,11 @@ function findPdfByName(fragment) {
   return knowledgeRecords.find((record) => record.type === "file" && lower(record.sourceFile).includes(frag));
 }
 
+function findDocumentByName(fragment) {
+  const frag = lower(fragment);
+  return knowledgeRecords.find((record) => record.type === "document" && lower(record.sourceFile).includes(frag));
+}
+
 function linkLine(record) {
   if (!record?.url) return "";
   return `\n\nOpen file: ${record.url}`;
@@ -724,6 +734,93 @@ function isInkInventoryRecord(record) {
   );
 }
 
+function isFormulaIdentifierField(fieldName) {
+  const k = lower(fieldName);
+
+  if (!k) return false;
+  if (k === "pantone / color") return true;
+  if (k === "pantone") return true;
+  if (k === "pms") return true;
+  if (k === "color") return true;
+  if (k === "ink") return true;
+  if (k === "formula") return true;
+  if (k.includes("ink color number")) return true;
+  if (k.includes("formula number")) return true;
+  if (k.includes("pantone")) return true;
+
+  return false;
+}
+
+function colorValueMatchesInkNumber(value, inkNumber) {
+  const wanted = normalizePart(inkNumber);
+  const raw = normalize(value);
+
+  if (!wanted || !raw) return false;
+
+  const rawUpper = raw.toUpperCase();
+  const normalized = normalizePart(rawUpper);
+
+  const directMatches = new Set([
+    wanted,
+    "INK" + wanted,
+    "PMS" + wanted,
+    "PANTONE" + wanted
+  ]);
+
+  if (directMatches.has(normalized)) return true;
+
+  const match = wanted.match(/^(\d{2,5})([A-Z]?)$/);
+  if (!match) return normalized === wanted;
+
+  const digits = match[1];
+  const suffix = match[2];
+
+  if (suffix) {
+    const pattern = new RegExp("(^|[^0-9])" + digits + "\\s*" + suffix + "($|[^0-9])");
+    return pattern.test(rawUpper);
+  }
+
+  const pattern = new RegExp("(^|[^0-9])" + digits + "\\s*(U|C)?($|[^0-9])");
+  return pattern.test(rawUpper);
+}
+
+function recordColorMatchesInkNumber(record, inkNumber) {
+  if (!record.fields) return false;
+
+  for (const [key, value] of Object.entries(record.fields)) {
+    if (!isFormulaIdentifierField(key)) continue;
+    if (colorValueMatchesInkNumber(value, inkNumber)) return true;
+  }
+
+  return false;
+}
+
+function findExactInkInventoryRecord(inkNumber) {
+  if (!inkNumber) return null;
+
+  return knowledgeRecords.find((record) => {
+    return (
+      record.category === "03_INK_ROOM" &&
+      record.type === "spreadsheet-row" &&
+      isInkInventoryRecord(record) &&
+      recordColorMatchesInkNumber(record, inkNumber)
+    );
+  });
+}
+
+function findExactInkFormulaRecords(inkNumber) {
+  if (!inkNumber) return [];
+
+  return knowledgeRecords.filter((record) => {
+    return (
+      record.category === "03_INK_ROOM" &&
+      record.type === "spreadsheet-row" &&
+      !isInkInventoryRecord(record) &&
+      recordColorMatchesInkNumber(record, inkNumber)
+    );
+  });
+}
+
 function isInkFormulaQuestion(msg) {
   const q = lower(msg);
 
@@ -739,6 +836,91 @@ function isInkFormulaQuestion(msg) {
     q.includes("batch") ||
     q.includes("ratio")
   );
+}
+
+function isWasteInkQuestion(msg) {
+  const q = lower(msg);
+
+  return (
+    q.includes("waste ink") ||
+    q.includes("waste tote") ||
+    q.includes("wastewater") ||
+    q.includes("waste water") ||
+    q.includes("used ink") ||
+    q.includes("ink waste") ||
+    q.includes("ink disposal") ||
+    (
+      q.includes("ink") &&
+      (
+        q.includes("pickup") ||
+        q.includes("pick up") ||
+        q.includes("picked up") ||
+        q.includes("disposal") ||
+        q.includes("dispose") ||
+        q.includes("environmental") ||
+        q.includes("who picks up") ||
+        q.includes("who pick up")
+      )
+    )
+  );
+}
+
+function isJonathanStatusQuestion(msg) {
+  const q = lower(msg);
+
+  return (
+    (
+      q.includes("jonathan") &&
+      (
+        q.includes("vacation") ||
+        q.includes("back") ||
+        q.includes("return") ||
+        q.includes("leaving") ||
+        q.includes("away") ||
+        q.includes("out") ||
+        q.includes("phone") ||
+        q.includes("number") ||
+        q.includes("contact") ||
+        q.includes("call") ||
+        q.includes("text") ||
+        q.includes("reach")
+      )
+    ) ||
+    q.includes("when is jonathan back") ||
+    q.includes("when will jonathan be back") ||
+    q.includes("how do i reach jonathan") ||
+    q.includes("call jonathan") ||
+    q.includes("text jonathan") ||
+    q.includes("jonathan's number") ||
+    q.includes("jonathan phone") ||
+    q.includes("jonathan contact")
+  );
+}
+
+function getJonathanStatusDocument() {
+  return (
+    findDocumentByName("JONATHAN_STATUS_AND_CONTACT") ||
+    findDocumentByName("jonathan status") ||
+    null
+  );
+}
+
+function getJonathanPhoneNumber() {
+  const doc = getJonathanStatusDocument();
+  const body = doc?.body || "";
+
+  const lineMatch = body.match(/Jonathan'?s phone number:\*\*\s*([^\n\r]+)/i);
+  const candidateLine = lineMatch ? lineMatch[1] : body;
+
+  const phoneMatch = candidateLine.match(/(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
+
+  if (!phoneMatch) return "";
+
+  const phone = normalize(phoneMatch[0]);
+
+  if (phone.includes("[") || phone.toLowerCase().includes("enter")) return "";
+
+  return phone;
 }
 
 function getPartMatchConfidence(query, record) {
@@ -1104,6 +1286,49 @@ function answerPartOrderingProcess() {
   );
 }
 
+function answerJonathanStatusQuestion(query) {
+  const q = lower(query);
+  const phone = getJonathanPhoneNumber();
+
+  let reply =
+    "Jonathan is leaving the evening of " + JONATHAN_AWAY_START + " and is expected back " + JONATHAN_RETURN + ".\n\n" +
+    JONATHAN_TRAVEL_NOTE;
+
+  if (
+    q.includes("phone") ||
+    q.includes("number") ||
+    q.includes("contact") ||
+    q.includes("call") ||
+    q.includes("text") ||
+    q.includes("reach")
+  ) {
+    if (phone) {
+      reply += "\n\nJonathan can be reached by call or text at " + phone + ".";
+    } else {
+      reply += "\n\nJonathan's phone number has not been filled into the JARVIS contact file yet.";
+    }
+  } else {
+    if (phone) {
+      reply += "\n\nIf this is urgent, you can ask JARVIS for Jonathan's phone number.";
+    } else {
+      reply += "\n\nIf this is urgent, notify supervision. Jonathan's phone number has not been filled into the JARVIS contact file yet.";
+    }
+  }
+
+  reply += "\n\nFor normal parts requests, PO/POR questions, inventory checks, ink questions, maps, and routine issues, JARVIS can help capture or answer the question here.";
+
+  return reply;
+}
+
+function answerWasteInkQuestion(query) {
+  return (
+    "Waste ink pickup is handled by Potomac Environmental.\n\n" +
+    "Pickup is not automatic. We have to call/initiate the pickup process when waste ink totes are ready.\n\n" +
+    "Before calling, physically verify how many waste ink totes are ready and confirm the pickup details with Jonathan or supervision.\n\n" +
+    "If this is urgent or storage space is becoming a problem, escalate it instead of assuming a pickup is already scheduled."
+  );
+}
+
 function answerThermostatQuestion(query) {
   const q = lower(query);
   let area = "";
@@ -1182,13 +1407,18 @@ function answerScheduleQuestion(query) {
 function answerInkQuestion(query) {
   const inkNumber = extractInkNumber(query);
 
+  if (inkNumber) {
+    const exactInventory = findExactInkInventoryRecord(inkNumber);
+    if (exactInventory) return answerInkInventoryRow(exactInventory);
+  }
+
   const results = searchKnowledge(query, {
     maxResults: 8,
     categories: ["03_INK_ROOM"],
     minScore: 25
   });
 
-  const spreadsheetResults = results.filter((record) => record.type === "spreadsheet-row");
+  const spreadsheetResults = results.filter((record) => record.type === "spreadsheet-row" && isInkInventoryRecord(record));
 
   if (inkNumber) {
     const exact = findBestExactFieldMatch(
@@ -1217,68 +1447,53 @@ function answerInkQuestion(query) {
 function answerInkFormulaQuestion(query) {
   const inkNumber = extractInkNumber(query);
 
-  const results = searchKnowledge(query, {
-    maxResults: 20,
-    categories: ["03_INK_ROOM"],
-    includeGuidance: true,
-    minScore: 20
-  });
-
-  let formulaRecords = results.filter((record) => !isInkInventoryRecord(record));
-
   if (inkNumber) {
-    const exactFormulaRows = formulaRecords.filter((record) => {
-      if (!record.fields) return normalizePart(record.body || "").includes(inkNumber);
-      const fields = record.fields;
-      const values = [
-        getField(fields, ["Ink Color Number", "Color", "Pantone", "PMS", "Formula Number", "Formula", "Ink"])
-      ].join(" ");
-      return normalizePart(values).includes(inkNumber);
-    });
+    const exactFormulaRows = findExactInkFormulaRecords(inkNumber);
 
-    if (exactFormulaRows.length) formulaRecords = exactFormulaRows;
-  }
+    if (exactFormulaRows.length) {
+      let reply = `I found formula record(s) for ink ${inkNumber}:\n\n`;
 
-  const spreadsheetFormulaRows = formulaRecords.filter((record) => record.type === "spreadsheet-row");
+      reply += exactFormulaRows
+        .slice(0, 3)
+        .map((record, index) => `Record ${index + 1}:\n${answerInkFormulaRow(record)}`)
+        .join("\n\n");
 
-  if (spreadsheetFormulaRows.length) {
-    let reply = inkNumber
-      ? `I found possible formula record(s) for ink ${inkNumber}:`
-      : "I found possible ink formula record(s):";
+      reply += "\n\nPlease verify the formula physically or with Jonathan/INX before mixing production ink.";
 
-    reply += "\n\n";
+      return reply;
+    }
 
-    reply += spreadsheetFormulaRows
-      .slice(0, 8)
-      .map((record, index) => `Record ${index + 1}:\n${answerInkFormulaRow(record)}`)
-      .join("\n\n");
+    let reply = `I could not find a formula record for ink ${inkNumber} in the current JARVIS ink files.`;
 
-    reply += "\n\nPlease verify the formula physically or with Jonathan/INX before mixing production ink.";
+    const exactInventory = findExactInkInventoryRecord(inkNumber);
+
+    if (exactInventory) {
+      reply += "\n\nI did find inventory information:\n\n" + answerInkInventoryRow(exactInventory);
+      reply += "\n\nDo not mix from a guessed formula. Verify with Jonathan/INX or the ink mixer system.";
+    } else {
+      reply += "\n\nI also could not confirm current inventory for that ink color.";
+    }
 
     return reply;
   }
 
-  const documentFormulaRecords = formulaRecords.filter((record) => record.type === "document");
+  const results = searchKnowledge(query, {
+    maxResults: 10,
+    categories: ["03_INK_ROOM"],
+    includeGuidance: true,
+    minScore: 35
+  });
 
-  if (documentFormulaRecords.length) {
+  const formulaRows = results.filter((record) => record.type === "spreadsheet-row" && !isInkInventoryRecord(record));
+
+  if (formulaRows.length) {
     return (
-      "I found ink-room guidance that may relate to this formula question:\n\n" +
-      makeExcerpt(documentFormulaRecords[0].body, query, 700) +
-      "\n\nI did not find a clean spreadsheet formula record. Please verify with Jonathan/INX before mixing production ink."
+      "I found possible formula-related records, but I need the exact ink/Pantone number to safely narrow this down.\n\n" +
+      "Try asking: what is the formula for ink 202? or what is the formula for Pantone 2935 U?"
     );
   }
 
-  let reply = inkNumber
-    ? `I could not find a formula record for ink ${inkNumber} in the current JARVIS ink files.`
-    : "I could not find a formula record for that ink in the current JARVIS ink files.";
-
-  const inventoryAnswer = answerInkQuestion(query);
-
-  if (!inventoryAnswer.startsWith("I could not find")) {
-    reply += "\n\nI did find inventory information:\n\n" + inventoryAnswer;
-  }
-
-  return reply;
+  return "I need the exact ink/Pantone number to look up a formula safely.";
 }
 
 function answerPartsLookup(query, context = {}) {
@@ -1585,6 +1800,8 @@ function looksLikeNewQuestion(msg) {
   ) return true;
 
   if (isPurchaseOrderPolicyQuestion(q)) return true;
+  if (isWasteInkQuestion(q)) return true;
+  if (isJonathanStatusQuestion(q)) return true;
   if (q.includes("ink") || q.includes("thermostat") || q.includes("temperature") || q.includes("eyewash") || q.includes("fire extinguisher")) return true;
 
   return false;
@@ -1595,9 +1812,10 @@ function classifyIntent(msg) {
 
   if (q === "" || q === "help") return "help";
 
+  if (isJonathanStatusQuestion(q)) return "jonathan_status";
   if (isPurchaseOrderPolicyQuestion(q)) return "po_policy";
   if (isPartOrderingProcessQuestion(q)) return "part_ordering_process";
-
+  if (isWasteInkQuestion(q)) return "waste_ink";
   if (isInkFormulaQuestion(q)) return "ink_formula";
 
   if (q.includes("ink") || q.includes("pantone") || q.includes("pms") || q.includes("drawdown") || q.includes("extender") || q.includes("inx")) return "ink";
@@ -2014,9 +2232,12 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
     case "help":
       return (
         "What can I help you with?\n\n" +
-        "You can ask about parts, ink, ink formulas, HVAC/thermostats, maps, knives, PO/POR requests, Magna rebuilds, Warehouse 4 mailshop equipment, safety training, or the 2-2-3 schedule.\n\n" +
+        "You can ask about parts, ink, ink formulas, waste ink pickup, Jonathan's vacation/contact info, HVAC/thermostats, maps, knives, PO/POR requests, Magna rebuilds, Warehouse 4 mailshop equipment, safety training, or the 2-2-3 schedule.\n\n" +
         `Knowledge base records loaded: ${knowledgeRecords.length}.`
       );
+
+    case "jonathan_status":
+      return answerJonathanStatusQuestion(cleanBody);
 
     case "po_policy":
       return answerPoRequest();
@@ -2032,6 +2253,9 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
 
     case "map":
       return answerMapQuestion(cleanBody);
+
+    case "waste_ink":
+      return answerWasteInkQuestion(cleanBody);
 
     case "ink_formula":
       return answerInkFormulaQuestion(cleanBody);
