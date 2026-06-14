@@ -579,7 +579,7 @@ function isBlankOrZero(value) {
 function safeFields(fields) {
   const entries = Object.entries(fields || {})
     .filter(([key, value]) => !isSensitiveField(key) && normalize(value) !== "")
-    .slice(0, 12);
+    .slice(0, 14);
 
   return Object.fromEntries(entries);
 }
@@ -622,6 +622,51 @@ function imageLine(imagePath) {
   return `\n\n[image:${imagePath}]`;
 }
 
+function buttonLine(value, label) {
+  return `[button:${value}|${label}]`;
+}
+
+function partMatchButtons() {
+  return (
+    "\n\n" +
+    buttonLine("yes", "Yes, this is the part") + "\n" +
+    buttonLine("that is not it", "No, not this part") + "\n" +
+    buttonLine("add original part", "Add original part to PO request")
+  );
+}
+
+function addMissingPartButtons() {
+  return (
+    "\n\n" +
+    buttonLine("add to po request", "Add to PO request") + "\n" +
+    buttonLine("cancel", "Cancel")
+  );
+}
+
+function dueDateButtons() {
+  return (
+    "\n\n" +
+    buttonLine("ASAP", "ASAP") + "\n" +
+    buttonLine("today", "Today") + "\n" +
+    buttonLine("tomorrow", "Tomorrow") + "\n" +
+    buttonLine("within 2 weeks", "Within 2 weeks")
+  );
+}
+
+function machineAreaButtons() {
+  return (
+    "\n\n" +
+    buttonLine("102", "102") + "\n" +
+    buttonLine("202", "202") + "\n" +
+    buttonLine("627-1", "627-1") + "\n" +
+    buttonLine("627-2", "627-2") + "\n" +
+    buttonLine("627-3", "627-3") + "\n" +
+    buttonLine("Ink Room", "Ink Room") + "\n" +
+    buttonLine("WH2", "WH2") + "\n" +
+    buttonLine("Maintenance", "Maintenance")
+  );
+}
+
 function extractInkNumber(query) {
   const q = lower(query);
   const match = q.match(/(?:ink|pms|pantone|color)\s*#?\s*([0-9]{2,5}[a-z]?)/i);
@@ -629,6 +674,7 @@ function extractInkNumber(query) {
 
   const anyNumber = q.match(/\b([0-9]{2,5}[a-z]?)\b/i);
   if (q.includes("ink") && anyNumber) return normalizePart(anyNumber[1]);
+  if (isInkFormulaQuestion(q) && anyNumber) return normalizePart(anyNumber[1]);
 
   return "";
 }
@@ -665,6 +711,34 @@ function findBestExactFieldMatch(records, fieldNames, value) {
   }
 
   return null;
+}
+
+function isInkInventoryRecord(record) {
+  const keys = Object.keys(record.fields || {}).join(" ").toLowerCase();
+
+  return (
+    keys.includes("total weight") ||
+    keys.includes("container count") ||
+    keys.includes("last count") ||
+    keys.includes("weight lb")
+  );
+}
+
+function isInkFormulaQuestion(msg) {
+  const q = lower(msg);
+
+  return (
+    q.includes("formula") ||
+    q.includes("recipe") ||
+    q.includes("make more") ||
+    q.includes("mix more") ||
+    q.includes("mix ink") ||
+    q.includes("make ink") ||
+    q.includes("ingredients") ||
+    q.includes("components") ||
+    q.includes("batch") ||
+    q.includes("ratio")
+  );
 }
 
 function getPartMatchConfidence(query, record) {
@@ -734,6 +808,25 @@ function answerInkInventoryRow(top) {
   return reply;
 }
 
+function answerInkFormulaRow(record) {
+  if (record.type === "spreadsheet-row") {
+    const fields = safeFields(record.fields || {});
+    const lines = [];
+
+    for (const [key, value] of Object.entries(fields)) {
+      lines.push(`${key}: ${value}`);
+    }
+
+    if (lines.length) return lines.slice(0, 12).join("\n");
+  }
+
+  if (record.body) {
+    return makeExcerpt(record.body, "", 650);
+  }
+
+  return "Formula record found, but I could not summarize the fields cleanly.";
+}
+
 function answerPartsRow(top) {
   const fields = top.fields || {};
 
@@ -763,26 +856,46 @@ function answerPartsRow(top) {
   return reply;
 }
 
-function answerPartSearchResults(query, results) {
+function answerPartSearchResults(query, results, options = {}) {
+  const includeButtons = options.includeButtons || false;
+
   if (!results.length) {
-    return (
+    let reply =
       "I could not find that part in the current JARVIS parts inventory.\n\n" +
-      "Would you like me to add it to Jonathan's Purchase Order Request list?"
-    );
+      "Would you like me to add it to Jonathan's Purchase Order Request list?";
+
+    if (includeButtons) reply += addMissingPartButtons();
+
+    return reply;
   }
 
   const top = results[0];
   const confidence = getPartMatchConfidence(query, top);
 
   if (confidence === "exact") return answerPartsRow(top);
-  if (confidence === "likely") return "I found a likely match:\n\n" + answerPartsRow(top);
 
-  return (
-    "I did not find an exact match for that part number.\n\n" +
-    "I found one possible loose match, but I am not confident it is the same part:\n\n" +
-    answerPartsRow(top) +
-    "\n\nIf this is not the item you meant, say: that is not it."
-  );
+  let reply = "";
+
+  if (confidence === "likely") {
+    reply =
+      "I did not find an exact match for that part number.\n\n" +
+      "I found one likely match:\n\n" +
+      answerPartsRow(top);
+  } else {
+    reply =
+      "I did not find an exact match for that part number.\n\n" +
+      "I found one possible loose match, but I am not confident it is the same part:\n\n" +
+      answerPartsRow(top);
+  }
+
+  if (includeButtons) {
+    reply += "\n\nIs this the part you meant?";
+    reply += partMatchButtons();
+  } else {
+    reply += "\n\nIf this is not the item you meant, say: that is not it.";
+  }
+
+  return reply;
 }
 
 function answerKnifeRow(top) {
@@ -1101,6 +1214,73 @@ function answerInkQuestion(query) {
   return "I could not find that ink in the current JARVIS ink files. Please physically verify or ask Jonathan/INX if this affects production.";
 }
 
+function answerInkFormulaQuestion(query) {
+  const inkNumber = extractInkNumber(query);
+
+  const results = searchKnowledge(query, {
+    maxResults: 20,
+    categories: ["03_INK_ROOM"],
+    includeGuidance: true,
+    minScore: 20
+  });
+
+  let formulaRecords = results.filter((record) => !isInkInventoryRecord(record));
+
+  if (inkNumber) {
+    const exactFormulaRows = formulaRecords.filter((record) => {
+      if (!record.fields) return normalizePart(record.body || "").includes(inkNumber);
+      const fields = record.fields;
+      const values = [
+        getField(fields, ["Ink Color Number", "Color", "Pantone", "PMS", "Formula Number", "Formula", "Ink"])
+      ].join(" ");
+      return normalizePart(values).includes(inkNumber);
+    });
+
+    if (exactFormulaRows.length) formulaRecords = exactFormulaRows;
+  }
+
+  const spreadsheetFormulaRows = formulaRecords.filter((record) => record.type === "spreadsheet-row");
+
+  if (spreadsheetFormulaRows.length) {
+    let reply = inkNumber
+      ? `I found possible formula record(s) for ink ${inkNumber}:`
+      : "I found possible ink formula record(s):";
+
+    reply += "\n\n";
+
+    reply += spreadsheetFormulaRows
+      .slice(0, 8)
+      .map((record, index) => `Record ${index + 1}:\n${answerInkFormulaRow(record)}`)
+      .join("\n\n");
+
+    reply += "\n\nPlease verify the formula physically or with Jonathan/INX before mixing production ink.";
+
+    return reply;
+  }
+
+  const documentFormulaRecords = formulaRecords.filter((record) => record.type === "document");
+
+  if (documentFormulaRecords.length) {
+    return (
+      "I found ink-room guidance that may relate to this formula question:\n\n" +
+      makeExcerpt(documentFormulaRecords[0].body, query, 700) +
+      "\n\nI did not find a clean spreadsheet formula record. Please verify with Jonathan/INX before mixing production ink."
+    );
+  }
+
+  let reply = inkNumber
+    ? `I could not find a formula record for ink ${inkNumber} in the current JARVIS ink files.`
+    : "I could not find a formula record for that ink in the current JARVIS ink files.";
+
+  const inventoryAnswer = answerInkQuestion(query);
+
+  if (!inventoryAnswer.startsWith("I could not find")) {
+    reply += "\n\nI did find inventory information:\n\n" + inventoryAnswer;
+  }
+
+  return reply;
+}
+
 function answerPartsLookup(query, context = {}) {
   const results = searchKnowledge(query, {
     maxResults: 6,
@@ -1124,7 +1304,8 @@ function answerPartsLookup(query, context = {}) {
 
     return (
       "I could not find that part in the current JARVIS parts inventory.\n\n" +
-      "Would you like me to add it to Jonathan's Purchase Order Request list?"
+      "Would you like me to add it to Jonathan's Purchase Order Request list?" +
+      (context.from ? addMissingPartButtons() : "")
     );
   }
 
@@ -1142,7 +1323,7 @@ function answerPartsLookup(query, context = {}) {
     });
   }
 
-  return answerPartSearchResults(query, results);
+  return answerPartSearchResults(query, results, { includeButtons: context.from && confidence !== "exact" });
 }
 
 function answerOpenOrdersLookup(query) {
@@ -1289,8 +1470,6 @@ function isYesIntent(msg) {
     q === "yep" ||
     q === "please" ||
     q === "please do" ||
-    q === "add it" ||
-    q === "add this" ||
     q === "do it" ||
     q === "go ahead" ||
     q.includes("yes add") ||
@@ -1298,9 +1477,26 @@ function isYesIntent(msg) {
   );
 }
 
+function isAddToPoIntent(msg) {
+  const q = lower(msg);
+  return (
+    q === "add it" ||
+    q === "add this" ||
+    q === "add original part" ||
+    q === "add to po request" ||
+    q === "add to por" ||
+    q === "add to por request" ||
+    q.includes("add original") ||
+    q.includes("add to po") ||
+    q.includes("add to jonathan")
+  );
+}
+
 function isWrongPartIntent(msg) {
   const q = lower(msg);
   return (
+    q === "no" ||
+    q === "nope" ||
     q.includes("not the right part") ||
     q.includes("wrong part") ||
     q.includes("not right") ||
@@ -1401,6 +1597,8 @@ function classifyIntent(msg) {
 
   if (isPurchaseOrderPolicyQuestion(q)) return "po_policy";
   if (isPartOrderingProcessQuestion(q)) return "part_ordering_process";
+
+  if (isInkFormulaQuestion(q)) return "ink_formula";
 
   if (q.includes("ink") || q.includes("pantone") || q.includes("pms") || q.includes("drawdown") || q.includes("extender") || q.includes("inx")) return "ink";
 
@@ -1541,8 +1739,9 @@ function startMissingPartRequestFromPending(from, pending, requesterName) {
     "Okay. I can add this to Jonathan's next Purchase Order Request list.\n\n" +
     "Part Number: " + (pending.partNumber || pending.originalQuery || "Not provided") + "\n" +
     "Description: " + (pending.partDescription || "Not provided") + "\n\n" +
-    "What requested due date should I use?\n\n" +
-    "Examples: 6/20, next Friday, ASAP, or within 2 weeks.\n\n" +
+    "What requested due date should I use?" +
+    dueDateButtons() +
+    "\n\nYou can also type your own date, like 6/20 or next Friday.\n\n" +
     "Type cancel if you do not want to create this request."
   );
 }
@@ -1551,6 +1750,10 @@ async function handlePendingRequest({ pending, from, cleanBody, requesterName })
   const msg = lower(cleanBody);
 
   if (pending.step === "possible_part_match") {
+    if (isAddToPoIntent(msg)) {
+      return startMissingPartRequestFromPending(from, pending, requesterName);
+    }
+
     if (isWrongPartIntent(msg)) {
       pendingRequests.set(from, {
         ...pending,
@@ -1560,13 +1763,14 @@ async function handlePendingRequest({ pending, from, cleanBody, requesterName })
       return (
         "Got it. I will treat the original part as not found:\n\n" +
         (pending.partNumber || pending.originalQuery || "Original part not provided") +
-        "\n\nWould you like me to add it to Jonathan's Purchase Order Request list?"
+        "\n\nWould you like me to add it to Jonathan's Purchase Order Request list?" +
+        addMissingPartButtons()
       );
     }
 
     if (isYesIntent(msg)) {
       pendingRequests.delete(from);
-      return "Okay — please physically verify that possible match before relying on it for production. If you want me to add the original part instead, say: not the right part.";
+      return "Okay — please physically verify that possible match before relying on it for production. What can I help you with next?";
     }
 
     if (isCancelIntent(msg)) {
@@ -1579,10 +1783,15 @@ async function handlePendingRequest({ pending, from, cleanBody, requesterName })
       const reply = await getJarvisReply({ from, body: cleanBody, requesterName });
       return "I cleared the previous possible part match and answered your new question instead.\n\n" + reply;
     }
+
+    return (
+      "I need to know whether that possible part match is correct first." +
+      partMatchButtons()
+    );
   }
 
   if (pending.step === "confirm_add_missing_part") {
-    if (isYesIntent(msg)) return startMissingPartRequestFromPending(from, pending, requesterName);
+    if (isYesIntent(msg) || isAddToPoIntent(msg)) return startMissingPartRequestFromPending(from, pending, requesterName);
 
     if (isCancelIntent(msg)) {
       pendingRequests.delete(from);
@@ -1595,7 +1804,7 @@ async function handlePendingRequest({ pending, from, cleanBody, requesterName })
       return "I cleared the pending add-part offer and answered your new question instead.\n\n" + reply;
     }
 
-    return "Please answer yes to add the missing part to Jonathan's Purchase Order Request list, or type cancel.";
+    return "Please choose whether to add the missing part to Jonathan's Purchase Order Request list." + addMissingPartButtons();
   }
 
   if (isCancelIntent(msg)) {
@@ -1612,8 +1821,9 @@ async function handlePendingRequest({ pending, from, cleanBody, requesterName })
       pendingRequests.set(from, pending);
 
       return (
-        "Got it. What machine or area is this part for?\n\n" +
-        "Examples: 102, 202, 627-1, 627-2, 627-3, Ink Room, WH2, HVAC."
+        "Got it. What machine or area is this part for?" +
+        machineAreaButtons() +
+        "\n\nYou can also type another machine or area."
       );
     }
 
@@ -1624,8 +1834,9 @@ async function handlePendingRequest({ pending, from, cleanBody, requesterName })
     }
 
     return (
-      "I am waiting for the requested due date for the pending part request.\n\n" +
-      "Reply with something like 6/20, next Friday, ASAP, today, tomorrow, or within 2 weeks.\n\n" +
+      "I am waiting for the requested due date for the pending part request." +
+      dueDateButtons() +
+      "\n\nYou can also type something like 6/20, next Friday, ASAP, today, tomorrow, or within 2 weeks.\n\n" +
       "Or type cancel to stop this request."
     );
   }
@@ -1639,8 +1850,9 @@ async function handlePendingRequest({ pending, from, cleanBody, requesterName })
 
     if (!looksLikeMachineOrArea(cleanBody)) {
       return (
-        "I am waiting for the machine or area for the pending part request.\n\n" +
-        "Examples: 102, 202, 627-1, 627-2, 627-3, Ink Room, WH2, Maintenance, Shipping, or HVAC.\n\n" +
+        "I am waiting for the machine or area for the pending part request." +
+        machineAreaButtons() +
+        "\n\nYou can also type another machine or area.\n\n" +
         "Or type cancel to stop this request."
       );
     }
@@ -1732,42 +1944,53 @@ async function startPartRequest({ from, cleanBody, requesterName }) {
     minScore: 55
   });
 
-  let foundNote = "";
-
   if (lookupResults.length) {
     const confidence = getPartMatchConfidence(partNumber || cleanBody, lookupResults[0]);
 
-    if (confidence === "exact" || confidence === "likely") {
-      foundNote =
-        "Before I add the request, it looks like we may already have this:\n\n" +
-        answerPartSearchResults(partNumber || cleanBody, lookupResults) +
-        "\n\n";
-    } else {
-      foundNote =
-        "Before I add the request, I found one loose possible match, but I am not confident it is the same part:\n\n" +
-        answerPartSearchResults(partNumber || cleanBody, lookupResults) +
-        "\n\n";
+    if (confidence !== "exact") {
+      pendingRequests.set(from, {
+        step: "possible_part_match",
+        requesterName,
+        requesterPhone: from,
+        partNumber: partNumber || info.partNumber,
+        partDescription: info.partDescription || "",
+        originalQuery: cleanBody,
+        possibleMatchSummary: answerPartsRow(lookupResults[0])
+      });
+
+      return answerPartSearchResults(partNumber || cleanBody, lookupResults, { includeButtons: true });
     }
+
+    pendingRequests.set(from, {
+      step: "confirm_add_missing_part",
+      requesterName,
+      requesterPhone: from,
+      partNumber: partNumber || info.partNumber,
+      partDescription: info.partDescription || "",
+      originalQuery: cleanBody
+    });
+
+    return (
+      "I found an exact match in inventory:\n\n" +
+      answerPartsRow(lookupResults[0]) +
+      "\n\nIf you still need this added to Jonathan's PO request list, choose Add to PO request." +
+      addMissingPartButtons()
+    );
   }
 
   pendingRequests.set(from, {
-    step: "awaiting_due_date",
+    step: "confirm_add_missing_part",
     requesterName,
     requesterPhone: from,
     partNumber: partNumber || info.partNumber,
-    partDescription: info.partDescription,
-    quantityRequested: "",
-    notes: cleanBody
+    partDescription: info.partDescription || "",
+    originalQuery: cleanBody
   });
 
   return (
-    foundNote +
-    "I can add this to Jonathan's next Purchase Order Request list.\n\n" +
-    "Part Number: " + (partNumber || info.partNumber || "Not provided") + "\n" +
-    "Description: " + (info.partDescription || "Not provided") + "\n\n" +
-    "What requested due date should I use?\n\n" +
-    "Examples: 6/20, next Friday, ASAP, or within 2 weeks.\n\n" +
-    "Type cancel if you do not want to create this request."
+    "I could not find that part in the current JARVIS parts inventory.\n\n" +
+    "Would you like me to add it to Jonathan's Purchase Order Request list?" +
+    addMissingPartButtons()
   );
 }
 
@@ -1791,7 +2014,7 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
     case "help":
       return (
         "What can I help you with?\n\n" +
-        "You can ask about parts, ink, HVAC/thermostats, maps, knives, PO/POR requests, Magna rebuilds, Warehouse 4 mailshop equipment, safety training, or the 2-2-3 schedule.\n\n" +
+        "You can ask about parts, ink, ink formulas, HVAC/thermostats, maps, knives, PO/POR requests, Magna rebuilds, Warehouse 4 mailshop equipment, safety training, or the 2-2-3 schedule.\n\n" +
         `Knowledge base records loaded: ${knowledgeRecords.length}.`
       );
 
@@ -1809,6 +2032,9 @@ async function getJarvisReply({ from = "browser-test", body = "", requesterName 
 
     case "map":
       return answerMapQuestion(cleanBody);
+
+    case "ink_formula":
+      return answerInkFormulaQuestion(cleanBody);
 
     case "ink":
       return answerInkQuestion(cleanBody);
@@ -1853,7 +2079,7 @@ function getAskPageHtml() {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>J.A.R.V.I.S.</title>
   <style>
-    :root { --blue:#123a63; --blue2:#0f2f52; --dark:#1f2933; --border:#d6dee8; --green:#ecfdf3; --green-border:#a6d9b7; }
+    :root { --blue:#123a63; --blue2:#0f2f52; --dark:#1f2933; --border:#d6dee8; --green:#ecfdf3; --green-border:#a6d9b7; --button:#eef6ff; --button-border:#9cc4e8; }
     * { box-sizing:border-box; }
     html, body { height:100%; margin:0; font-family:Arial, Helvetica, sans-serif; background:#f6f9fc; color:var(--dark); }
     body { overflow:hidden; }
@@ -1871,6 +2097,9 @@ function getAskPageHtml() {
     .system { background:var(--green); border:1px solid var(--green-border); border-bottom-left-radius:6px; }
     .chat-image { display:block; max-width:100%; height:auto; margin:10px 0 4px; border:1px solid var(--border); border-radius:12px; background:white; cursor:zoom-in; }
     .image-caption { display:block; font-size:12px; color:#64748b; margin-top:4px; }
+    .quick-button { display:block; width:100%; text-align:left; margin:7px 0 0; padding:12px 13px; font-size:15px; font-weight:bold; color:var(--blue2); background:var(--button); border:1px solid var(--button-border); border-radius:12px; cursor:pointer; }
+    .quick-button:hover { background:#dff0ff; }
+    .quick-button:disabled { opacity:.55; cursor:default; }
     .composer { flex:0 0 auto; background:white; border-top:1px solid var(--border); padding:10px; box-shadow:0 -2px 10px rgba(15,23,42,.06); }
     .name-row { display:flex; gap:8px; margin-bottom:8px; }
     .name-row input { width:100%; border:1px solid var(--border); border-radius:12px; padding:10px 12px; font-size:15px; }
@@ -1928,11 +2157,22 @@ function getAskPageHtml() {
       return /^\\/kb\\/.+\\.(png|jpg|jpeg|webp)$/i.test(src);
     }
 
+    function disableButtonsNear(button) {
+      const bubble = button.closest(".bubble");
+      if (!bubble) return;
+
+      bubble.querySelectorAll(".quick-button").forEach((btn) => {
+        btn.disabled = true;
+      });
+    }
+
     function renderMessageContent(container, text) {
       const lines = String(text).split("\\n");
 
       lines.forEach((line, index) => {
-        const imageMatch = line.trim().match(/^\\[image:(\\/kb\\/[^\\]]+\\.(?:png|jpg|jpeg|webp))\\]$/i);
+        const trimmed = line.trim();
+        const imageMatch = trimmed.match(/^\\[image:(\\/kb\\/[^\\]]+\\.(?:png|jpg|jpeg|webp))\\]$/i);
+        const buttonMatch = trimmed.match(/^\\[button:([^|\\]]+)\\|([^\\]]+)\\]$/i);
 
         if (imageMatch && isSafeImagePath(imageMatch[1])) {
           const image = document.createElement("img");
@@ -1952,6 +2192,20 @@ function getAskPageHtml() {
           caption.className = "image-caption";
           caption.textContent = "Tap/click the map to open it larger.";
           container.appendChild(caption);
+        } else if (buttonMatch) {
+          const value = buttonMatch[1].trim();
+          const label = buttonMatch[2].trim();
+
+          const button = document.createElement("button");
+          button.className = "quick-button";
+          button.type = "button";
+          button.textContent = label;
+          button.onclick = () => {
+            disableButtonsNear(button);
+            sendJarvisQuestion(value, label);
+          };
+
+          container.appendChild(button);
         } else {
           container.appendChild(document.createTextNode(line));
         }
@@ -1978,32 +2232,28 @@ function getAskPageHtml() {
       scrollChatToBottom();
     }
 
-    async function askJarvis() {
+    async function sendJarvisQuestion(question, displayText) {
       const nameInput = document.getElementById("name");
-      const questionInput = document.getElementById("question");
       const button = document.getElementById("askButton");
 
       const name = nameInput.value.trim();
-      const question = questionInput.value.trim();
+      const textToSend = String(question || "").trim();
+      const textToShow = String(displayText || question || "").trim();
 
-      if (!question) {
-        questionInput.focus();
-        return;
-      }
+      if (!textToSend) return;
 
       localStorage.setItem("jarvisName", name);
 
       button.disabled = true;
       button.textContent = "...";
 
-      addMessage(question, "user");
-      questionInput.value = "";
+      addMessage(textToShow, "user");
 
       try {
         const response = await fetch("/api/ask", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: getSessionId(), name, question })
+          body: JSON.stringify({ sessionId: getSessionId(), name, question: textToSend })
         });
 
         const data = await response.json();
@@ -2018,9 +2268,22 @@ function getAskPageHtml() {
       } finally {
         button.disabled = false;
         button.textContent = "Ask";
-        questionInput.focus();
+        document.getElementById("question").focus();
         scrollChatToBottom();
       }
+    }
+
+    async function askJarvis() {
+      const questionInput = document.getElementById("question");
+      const question = questionInput.value.trim();
+
+      if (!question) {
+        questionInput.focus();
+        return;
+      }
+
+      questionInput.value = "";
+      await sendJarvisQuestion(question, question);
     }
 
     document.addEventListener("DOMContentLoaded", () => {
