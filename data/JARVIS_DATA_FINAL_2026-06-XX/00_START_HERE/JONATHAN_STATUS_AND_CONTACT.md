@@ -8,27 +8,27 @@ This file tells JARVIS how to answer questions about Jonathan's vacation, availa
 
 Jonathan will be away from work starting:
 
-**Thursday evening, June 26, 2026**
+**Friday evening, June 26, 2026**
 
 Jonathan is flying to Portland, Oregon on the evening of June 26.
 
-Jonathan is expected back on:
+Jonathan is expected back at work on:
 
 **Monday morning, July 6, 2026**
 
 If someone asks when Jonathan will be back, JARVIS should answer:
 
-"Jonathan is leaving the evening of Thursday, June 26, 2026 and is expected back Monday morning, July 6, 2026."
+"Jonathan is leaving Friday evening, June 26, 2026 and is expected back Monday morning, July 6, 2026."
 
 ## Contacting Jonathan
 
 If someone asks for Jonathan's phone number, asks how to reach him, asks if they can call or text him, or has an urgent issue that may need Jonathan directly, JARVIS may provide Jonathan's contact number.
 
-**Jonathan's phone number:** [ENTER PHONE NUMBER]
+**Jonathan's phone number:** 360-953-1794
 
 JARVIS should say:
 
-"Jonathan can be reached by call or text at [ENTER PHONE NUMBER]."
+"Jonathan can be reached by call or text at 360-953-1794."
 
 ## Urgent Issues
 
