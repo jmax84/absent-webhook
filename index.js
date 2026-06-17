@@ -7,7 +7,6 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const { twiml: Twiml } = twilioPkg;
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -15,8 +14,13 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: "2mb" }));
 
-const APP_VERSION = "0.2.10";
+const APP_VERSION = "0.2.11";
 const DATA_ROOT = path.join(__dirname, "data", "JARVIS_DATA_FINAL_2026-06-XX");
+const pendingRequests = new Map();
+
+let knowledgeRecords = [];
+let knowledgeLoadedAt = null;
+let knowledgeLoadError = null;
 
 const HVAC_THERMOSTAT_IMAGE = "/kb/04_HVAC_AND_BUILDING/HVAC_thermostat_locations.png";
 const EYEWASH_IMAGE = "/kb/04_HVAC_AND_BUILDING/FACILITY_eye_wash_stations.png";
@@ -27,31 +31,8 @@ const JONATHAN_TRAVEL_NOTE = "Jonathan is flying to Portland, Oregon on the even
 const JONATHAN_RETURN = "Monday morning, July 6, 2026";
 const JONATHAN_PHONE_FALLBACK = "360-953-1794";
 
-const pendingRequests = new Map();
-
-let knowledgeRecords = [];
-let knowledgeLoadedAt = null;
-let knowledgeLoadError = null;
-
-const SEARCH_STOPWORDS = new Set([
-  "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do", "does",
-  "for", "from", "have", "how", "i", "in", "is", "it", "me", "need", "of", "on",
-  "or", "our", "please", "send", "the", "there", "this", "to", "we", "what",
-  "when", "where", "who", "with", "you"
-]);
-
-const SENSITIVE_FIELD_PATTERNS = [
-  /cost/i,
-  /unit\s*price/i,
-  /total\s*price/i,
-  /price/i,
-  /dollar/i,
-  /amount/i,
-  /margin/i,
-  /markup/i,
-  /account/i,
-  /approval/i
-];
+const SENSITIVE_FIELD_PATTERNS = [/cost/i, /unit\s*price/i, /total\s*price/i, /price/i, /dollar/i, /amount/i, /margin/i, /markup/i, /account/i, /approval/i];
+const SEARCH_STOPWORDS = new Set(["a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do", "does", "for", "from", "have", "how", "i", "in", "is", "it", "me", "need", "of", "on", "or", "our", "please", "send", "the", "there", "this", "to", "we", "what", "when", "where", "who", "with", "you"]);
 
 const COMMON_SUPPLY_WORDS = [
   "battery", "batteries", "aa battery", "aaa battery", "9v battery", "9 volt battery",
@@ -97,19 +78,12 @@ function getFileType(filePath) {
 
 function walkFiles(dir) {
   if (!fs.existsSync(dir)) return [];
-
   const files = [];
-
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
-
-    if (entry.isDirectory()) {
-      files.push(...walkFiles(fullPath));
-    } else {
-      files.push(fullPath);
-    }
+    if (entry.isDirectory()) files.push(...walkFiles(fullPath));
+    else files.push(fullPath);
   }
-
   return files;
 }
 
@@ -133,56 +107,35 @@ function isGuidanceRecord(record) {
   const src = lower(record.sourceFile || "");
   const title = lower(record.title || "");
   const sheet = lower(record.sheetName || "");
-
-  return (
-    sheet === "readme" ||
-    src.includes("readme") ||
-    src.includes("rules") ||
-    src.includes("notes") ||
-    src.includes("index") ||
-    src.includes("policy") ||
-    src.includes("search") ||
-    src.includes("data_last_updated") ||
-    title.includes("rules") ||
-    title.includes("notes") ||
-    title.includes("index") ||
-    title.includes("policy") ||
-    title.includes("search")
-  );
+  return sheet === "readme" || src.includes("readme") || src.includes("rules") || src.includes("notes") || src.includes("index") || src.includes("policy") || src.includes("search") || src.includes("data_last_updated") || title.includes("rules") || title.includes("notes") || title.includes("index") || title.includes("policy") || title.includes("search");
 }
 
 function extractSearchKeys(text) {
   const keys = new Set();
   const rawTokens = normalize(text).match(/[A-Za-z0-9][A-Za-z0-9._\-/]{1,}[A-Za-z0-9]/g) || [];
-
   for (const token of rawTokens) {
     const part = normalizePart(token);
     if (part.length >= 3 && /\d/.test(part)) keys.add(part);
-
     const digits = digitsOnly(token);
     if (digits.length >= 3) keys.add(digits);
   }
-
   return [...keys];
 }
 
 function recordSearchText(record) {
   const pieces = [record.title, record.category, record.sourceFile, record.body, record.sheetName];
-
   if (record.fields) {
     for (const [key, value] of Object.entries(record.fields)) {
       if (isSensitiveField(key)) continue;
       pieces.push(key, value);
     }
   }
-
   return pieces.filter(Boolean).join(" ");
 }
 
 function addKnowledgeRecord(record) {
   const text = recordSearchText(record);
   const searchKeys = new Set(extractSearchKeys(text));
-
   if (record.fields) {
     for (const [key, value] of Object.entries(record.fields)) {
       if (/(part|item|number|model|serial|quote|knife|color|pantone|pms|machine|id|formula|ink|vendor|phone|contact)/i.test(key)) {
@@ -190,12 +143,7 @@ function addKnowledgeRecord(record) {
       }
     }
   }
-
-  knowledgeRecords.push({
-    ...record,
-    normalizedText: normalizeLoose(text),
-    searchKeys: [...searchKeys]
-  });
+  knowledgeRecords.push({ ...record, normalizedText: normalizeLoose(text), searchKeys: [...searchKeys] });
 }
 
 function loadMarkdownFile(filePath) {
@@ -217,29 +165,18 @@ function cleanCellValue(value) {
 
 function loadWorkbookFile(filePath) {
   const workbook = XLSX.readFile(filePath, { cellDates: true });
-
   for (const sheetName of workbook.SheetNames) {
     if (/^README$/i.test(sheetName)) continue;
-
-    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
-      defval: "",
-      raw: false
-    });
-
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: "", raw: false });
     rows.forEach((row, index) => {
       const fields = {};
-
       for (const [key, value] of Object.entries(row)) {
         const cleanKey = normalize(key);
         const cleanValue = cleanCellValue(value);
-
         if (!cleanKey || cleanKey.startsWith("__EMPTY")) continue;
-
         fields[cleanKey] = cleanValue;
       }
-
       if (!Object.values(fields).some((value) => normalize(value))) return;
-
       addKnowledgeRecord({
         type: "spreadsheet-row",
         category: categoryFromFile(filePath),
@@ -261,42 +198,28 @@ function loadPdfFile(filePath) {
     title: titleFromFile(filePath),
     sourceFile: relativeDataPath(filePath),
     url: publicKbUrl(filePath),
-    body: `${titleFromFile(filePath)} PDF reference document.`
+    body: titleFromFile(filePath) + " PDF reference document."
   });
 }
 
 function loadKnowledgeBase() {
   knowledgeRecords = [];
   knowledgeLoadError = null;
-
   try {
     const files = walkFiles(DATA_ROOT);
-
     for (const filePath of files) {
       const rel = relativeDataPath(filePath);
-
       if (rel.startsWith("99_DO_NOT_USE_YET/")) continue;
-
       const ext = getFileType(filePath);
-
       try {
         if (["md", "txt"].includes(ext)) loadMarkdownFile(filePath);
         else if (["xlsx", "xls"].includes(ext)) loadWorkbookFile(filePath);
         else if (ext === "pdf") loadPdfFile(filePath);
       } catch (error) {
         console.error("Failed to load " + rel + ":", error);
-
-        addKnowledgeRecord({
-          type: "load-error",
-          category: categoryFromFile(filePath),
-          title: titleFromFile(filePath),
-          sourceFile: rel,
-          url: publicKbUrl(filePath),
-          body: "This file could not be loaded: " + error.message
-        });
+        addKnowledgeRecord({ type: "load-error", category: categoryFromFile(filePath), title: titleFromFile(filePath), sourceFile: rel, url: publicKbUrl(filePath), body: "This file could not be loaded: " + error.message });
       }
     }
-
     knowledgeLoadedAt = new Date();
     console.log("JARVIS knowledge loaded: " + knowledgeRecords.length + " records from " + files.length + " files.");
   } catch (error) {
@@ -309,2058 +232,2249 @@ function levenshtein(a, b) {
   if (a === b) return 0;
   if (!a) return b.length;
   if (!b) return a.length;
-
   const matrix = Array.from({ length: a.length + 1 }, () => []);
-
   for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
   for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
-
   for (let i = 1; i <= a.length; i++) {
     for (let j = 1; j <= b.length; j++) {
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-
-      matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,
-        matrix[i][j - 1] + 1,
-        matrix[i - 1][j - 1] + cost
-      );
+      matrix[i][j] = Math.min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + cost);
     }
   }
-
   return matrix[a.length][b.length];
-}
-
-function scoreRecord(record, query) {
-  const qLoose = normalizeLoose(query);
-  const terms = qLoose
-    .split(" ")
-    .filter((term) => term.length >= 2 && !SEARCH_STOPWORDS.has(term));
-
-  const queryKeys = extractSearchKeys(query);
-  const queryDigits = [...new Set(queryKeys.map((key) => digitsOnly(key)).filter((key) => key.length >= 3))];
-
-  let score = 0;
-
-  if (!qLoose) return 0;
-
-  if (isGuidanceRecord(record)) score -= 20;
-
-  if (record.normalizedText.includes(qLoose)) score += 75;
-
-  let matchedTerms = 0;
-
-  for (const term of terms) {
-    if (record.normalizedText.includes(term)) matchedTerms += 1;
-  }
-
-  if (matchedTerms > 0) score += matchedTerms * 8 + (matchedTerms === terms.length ? 20 : 0);
-
-  for (const queryKey of queryKeys) {
-    for (const recordKey of record.searchKeys || []) {
-      if (recordKey === queryKey) {
-        score += 120;
-      } else if (queryKey.length >= 4 && recordKey.length >= 4) {
-        const queryDigitsOnly = digitsOnly(queryKey);
-        const recordDigitsOnly = digitsOnly(recordKey);
-
-        if (
-          queryKey[0] === recordKey[0] &&
-          queryDigitsOnly.length >= 4 &&
-          recordDigitsOnly.length >= 4 &&
-          (recordKey.includes(queryKey) || queryKey.includes(recordKey))
-        ) {
-          score += 60;
-        } else if (levenshtein(recordKey, queryKey) <= (Math.max(queryKey.length, recordKey.length) <= 6 ? 1 : 2)) {
-          score += 25;
-        }
-      }
-    }
-  }
-
-  for (const queryDigit of queryDigits) {
-    for (const recordKey of record.searchKeys || []) {
-      const recordDigits = digitsOnly(recordKey);
-      if (recordDigits === queryDigit) score += 90;
-    }
-  }
-
-  if (record.type === "spreadsheet-row") score += 5;
-
-  return score;
-}
-
-function searchKnowledge(query, options = {}) {
-  const maxResults = options.maxResults || 5;
-  const categories = options.categories || [];
-  const includeGuidance = options.includeGuidance || false;
-  const minScore = options.minScore ?? 25;
-
-  let records = knowledgeRecords;
-
-  if (categories.length) {
-    records = records.filter((record) => categories.includes(record.category));
-  }
-
-  if (!includeGuidance) {
-    const nonGuidance = records.filter((record) => !isGuidanceRecord(record));
-    if (nonGuidance.length) records = nonGuidance;
-  }
-
-  return records
-    .map((record) => ({ ...record, score: scoreRecord(record, query) }))
-    .filter((record) => record.score >= minScore)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, maxResults);
-}
-
-function getField(fields, names) {
-  const entries = Object.entries(fields || {});
-  const wanted = names.map((name) => lower(name));
-
-  for (const [key, value] of entries) {
-    if (wanted.includes(lower(key))) return normalize(value);
-  }
-
-  for (const [key, value] of entries) {
-    const keyNorm = lower(key).replace(/[^a-z0-9]/g, "");
-
-    for (const name of wanted) {
-      if (keyNorm === name.replace(/[^a-z0-9]/g, "")) return normalize(value);
-    }
-  }
-
-  return "";
-}
-
-function isBlankOrZero(value) {
-  const clean = normalize(value);
-  if (!clean) return true;
-
-  const number = Number(clean.replace(/[^0-9.-]/g, ""));
-  return Number.isFinite(number) && number <= 0;
-}
-
-function safeFields(fields, limit = 12) {
-  return Object.fromEntries(
-    Object.entries(fields || {})
-      .filter(([key, value]) => !isSensitiveField(key) && normalize(value) !== "")
-      .slice(0, limit)
-  );
-}
-
-function makeExcerpt(body, query, maxLen = 700) {
-  const text = normalize(body).replace(/\s+/g, " ");
-
-  if (text.length <= maxLen) return text;
-
-  const terms = normalizeLoose(query)
-    .split(" ")
-    .filter((term) => term.length > 3 && !SEARCH_STOPWORDS.has(term));
-
-  const lowerText = text.toLowerCase();
-  let idx = -1;
-
-  for (const term of terms) {
-    idx = lowerText.indexOf(term);
-    if (idx >= 0) break;
-  }
-
-  if (idx < 0) idx = 0;
-
-  const start = Math.max(0, idx - 180);
-  const end = Math.min(text.length, start + maxLen);
-
-  return (start > 0 ? "..." : "") + text.slice(start, end) + (end < text.length ? "..." : "");
-}
-
-function findPdfByName(fragment) {
-  const frag = lower(fragment);
-  return knowledgeRecords.find((record) => record.type === "file" && lower(record.sourceFile).includes(frag));
-}
-
-function findDocumentByName(fragment) {
-  const frag = lower(fragment);
-  return knowledgeRecords.find((record) => record.type === "document" && lower(record.sourceFile).includes(frag));
-}
-
-function linkLine(record) {
-  return record?.url ? "\n\nOpen file: " + record.url : "";
-}
-
-function imageLine(imagePath) {
-  return "\n\n[image:" + imagePath + "]";
-}
-
-function buttonLine(value, label) {
-  return "[button:" + value + "|" + label + "]";
-}
-
-function addMissingPartButtons() {
-  return "\n\n" + buttonLine("add to po request", "Add to PO request") + "\n" + buttonLine("cancel", "Cancel");
-}
-
-function partMatchButtons() {
-  return "\n\n" + buttonLine("yes", "Yes, this is it") + "\n" + buttonLine("that is not it", "No, not this item") + "\n" + buttonLine("add original part", "Add original item to PO request");
-}
-
-function dueDateButtons() {
-  return "\n\n" + buttonLine("ASAP", "ASAP") + "\n" + buttonLine("today", "Today") + "\n" + buttonLine("tomorrow", "Tomorrow") + "\n" + buttonLine("within 2 weeks", "Within 2 weeks");
-}
-
-function machineAreaButtons() {
-  return "\n\n" +
-    buttonLine("102", "102") + "\n" +
-    buttonLine("202", "202") + "\n" +
-    buttonLine("627-1", "627-1") + "\n" +
-    buttonLine("627-2", "627-2") + "\n" +
-    buttonLine("627-3", "627-3") + "\n" +
-    buttonLine("Ink Room", "Ink Room") + "\n" +
-    buttonLine("WH2", "WH2") + "\n" +
-    buttonLine("Maintenance", "Maintenance");
-}
-
-function formulaBatchButtons() {
-  return "\n\n" +
-    buttonLine("5 lb", "5 lb") + "\n" +
-    buttonLine("10 lb", "10 lb") + "\n" +
-    buttonLine("25 lb", "25 lb") + "\n" +
-    buttonLine("50 lb", "50 lb");
 }
 
 function hasExplicitKnifeLanguage(query) {
   const q = lower(query);
-
-  return (
-    q.includes("knife") ||
-    q.includes("knives") ||
-    q.includes("cutoff") ||
-    q.includes("cut-off") ||
-    q.includes("profile") ||
-    q.includes("side knife") ||
-    q.includes("sharpen")
-  );
+  return q.includes("knife") || q.includes("knives") || q.includes("cutoff") || q.includes("cut-off") || q.includes("profile") || q.includes("side knife") || q.includes("sharpen");
 }
 
 function looksLikePartNumber(query) {
   const q = normalize(query);
   const tokens = q.match(/[A-Za-z0-9][A-Za-z0-9._\-/]{1,}[A-Za-z0-9]/g) || [];
-
   for (const token of tokens) {
     const normalized = normalizePart(token);
-
     if (normalized.length < 3) continue;
     if (/[A-Z]/.test(normalized) && /\d/.test(normalized)) return true;
     if (/[._\-/]/.test(token) && /\d/.test(normalized) && normalized.length >= 4) return true;
   }
-
   if (/\b\d{3,6}\s*(zz|z|rs|c3|c4|2rs|rsr|llu|llb)\b/i.test(q)) return true;
   if (/\b(k|v|p|m|a|b|c|d|db|wd|w)\s*\.?\s*\d{2,}[\d.a-z\-\/]*\b/i.test(q)) return true;
-
   return false;
 }
+function containsCommonSupplyWord(query) {
+  const q = normalizeLoose(query);
+  return COMMON_SUPPLY_WORDS.some((word) => {
+    const w = normalizeLoose(word);
+    if (!w) return false;
+    return q === w || q.includes(w);
+  });
+}
 
-function extractCandidatePartNumber(query) {
-  const tokens = normalize(query).match(/[A-Za-z0-9][A-Za-z0-9._\-/]{1,}[A-Za-z0-9]/g) || [];
+function extractCommonSupplyName(query) {
+  const q = normalizeLoose(query);
 
-  for (const token of tokens) {
-    const normalized = normalizePart(token);
+  if (/\baa\s+batter(y|ies)\b/.test(q) || /\baa\s+size\s+batter(y|ies)\b/.test(q)) return "AA batteries";
+  if (/\baaa\s+batter(y|ies)\b/.test(q) || /\baaa\s+size\s+batter(y|ies)\b/.test(q)) return "AAA batteries";
+  if (/\b9\s*v\s+batter(y|ies)\b/.test(q) || /\b9v\s+batter(y|ies)\b/.test(q) || /\b9\s*volt\s+batter(y|ies)\b/.test(q)) return "9V batteries";
+  if (/\bbatter(y|ies)\b/.test(q)) return "batteries";
+  if (/\bzip\s+ties?\b/.test(q) || /\bcable\s+ties?\b/.test(q)) return "zip ties";
+  if (/\bgloves?\b/.test(q)) return "gloves";
+  if (/\btape\b/.test(q)) return "tape";
+  if (/\bshop\s+towels?\b/.test(q)) return "shop towels";
+  if (/\bmarkers?\b/.test(q) || /\bsharpies?\b/.test(q)) return "markers";
+  if (/\blight\s+bulbs?\b/.test(q) || /\bbulbs?\b/.test(q)) return "light bulbs";
+  if (/\bknife\s+blades?\b/.test(q) || /\brazors?\b/.test(q)) return "knife blades";
 
-    if (normalized.length < 3) continue;
-    if ((/[A-Z]/.test(normalized) && /\d/.test(normalized)) || (/[._\-/]/.test(token) && /\d/.test(normalized))) return token;
+  const cleaned = q
+    .replace(/\b(i|we|they)\b/g, "")
+    .replace(/\b(need|needs|needed|want|looking|for|part|supply|supplies|some|a|an|the|do|we|have|any|get|find)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return cleaned || normalize(query);
+}
+
+function isVagueInkRequest(query) {
+  const q = normalizeLoose(query);
+  return [
+    "ink",
+    "i need ink",
+    "need ink",
+    "help with ink",
+    "ink help",
+    "i need help with ink",
+    "can you help with ink"
+  ].includes(q);
+}
+
+function hasInkLanguage(query) {
+  const q = normalizeLoose(query);
+  return /\b(ink|pantone|pms|color|formula|make|mix)\b/.test(q);
+}
+
+function extractInkNumber(query) {
+  const raw = normalize(query);
+
+  const patterns = [
+    /\b(?:ink|pms|pantone|color|colour|formula)\s*(?:number|#|no\.?)?\s*([0-9]{1,4})(?:\s*[- ]?\s*([uc]))?\b/i,
+    /\b(?:make|mix)\s+(?:me\s+)?(?:ink\s+)?(?:number\s+)?([0-9]{1,4})(?:\s*[- ]?\s*([uc]))?\b/i,
+    /\b([0-9]{1,4})\s*[- ]?\s*([uc])\b/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match) {
+      const number = match[1];
+      const suffix = match[2] ? match[2].toUpperCase() : "";
+      return suffix ? `${number} ${suffix}` : number;
+    }
+  }
+
+  if (hasInkLanguage(raw)) {
+    const simple = raw.match(/\b([0-9]{2,4})\b/);
+    if (simple) return simple[1];
   }
 
   return "";
 }
 
-function extractBatchSizePounds(query) {
-  const q = lower(query);
+function extractBatchPounds(query) {
+  const raw = normalize(query);
+  const patterns = [
+    /\b(\d+(?:\.\d+)?)\s*(?:lb|lbs|pound|pounds)\b/i,
+    /\bmake\s+(\d+(?:\.\d+)?)\b/i
+  ];
 
-  let match = q.match(/\b(\d+(?:\.\d+)?)\s*(?:pounds|pound|lbs|lb)\b/);
-  if (match) return Number(match[1]);
-
-  match = q.match(/\bmake\s+(\d+(?:\.\d+)?)\b/);
-  if (match && (q.includes("ink") || q.includes("formula") || q.includes("mix"))) return Number(match[1]);
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match) {
+      const value = Number(match[1]);
+      if (Number.isFinite(value) && value > 0 && value <= 10000) return value;
+    }
+  }
 
   return null;
 }
 
-function isInkFormulaQuestion(msg) {
-  const q = lower(msg);
+function canonicalInkParts(inkText) {
+  const raw = normalize(inkText).toUpperCase();
+  const match = raw.match(/\b0*([0-9]{1,4})(?:\s*[- ]?\s*([UC]))?\b/);
+  if (!match) return null;
+  return {
+    numberRaw: (raw.match(/\b([0-9]{1,4})(?:\s*[- ]?\s*[UC])?\b/) || [null, match[1]])[1],
+    numberNoLeadingZeros: match[1],
+    suffix: match[2] || ""
+  };
+}
 
-  if (q.includes("formula") || q.includes("recipe") || q.includes("ingredients") || q.includes("components") || q.includes("batch") || q.includes("ratio")) return true;
-  if ((q.includes("make") || q.includes("mix")) && (q.includes("ink") || q.includes("pms") || q.includes("pantone") || q.includes("color"))) return true;
-  if ((q.includes("pounds") || q.includes("pound") || q.includes("lbs") || q.includes("lb")) && (q.includes("ink") || q.includes("pms") || q.includes("pantone"))) return true;
+function canonicalInkLabel(inkText) {
+  const parts = canonicalInkParts(inkText);
+  if (!parts) return normalize(inkText).toUpperCase();
+  return parts.suffix ? `${parts.numberNoLeadingZeros} ${parts.suffix}` : parts.numberNoLeadingZeros;
+}
+
+function exactInkLabel(inkText) {
+  const raw = normalize(inkText).toUpperCase();
+  const match = raw.match(/\b([0-9]{1,4})(?:\s*[- ]?\s*([UC]))?\b/);
+  if (!match) return raw;
+  return match[2] ? `${match[1]} ${match[2]}` : match[1];
+}
+
+function inkNumberHasLeadingZero(inkText) {
+  const raw = normalize(inkText);
+  const match = raw.match(/\b(0+[0-9]{1,4})(?:\s*[- ]?\s*[uc])?\b/i);
+  return !!match;
+}
+
+function stripLeadingZerosInk(inkText) {
+  const raw = normalize(inkText).toUpperCase();
+  const match = raw.match(/\b(0*[0-9]{1,4})(?:\s*[- ]?\s*([UC]))?\b/);
+  if (!match) return raw;
+  const num = String(Number(match[1]));
+  return match[2] ? `${num} ${match[2]}` : num;
+}
+
+function colorValueMatchesExactInk(value, requestedInk) {
+  const requested = exactInkLabel(requestedInk);
+  const requestedParts = requested.match(/^([0-9]{1,4})(?:\s+([UC]))?$/);
+  if (!requestedParts) return false;
+
+  const reqNum = requestedParts[1];
+  const reqSuffix = requestedParts[2] || "";
+
+  const text = normalize(value).toUpperCase();
+
+  const colorMatches = [...text.matchAll(/\b(?:PMS|PANTONE|INK|COLOR|COLOUR)?\s*0*([0-9]{1,4})(?:\s*[- ]?\s*([UC]))?\b/g)];
+
+  for (const match of colorMatches) {
+    const foundFull = match[0].trim();
+    const foundNumRaw = match[1];
+    const foundSuffix = match[2] || "";
+
+    const rawNumberFromText = (foundFull.match(/\b([0-9]{1,4})(?:\s*[- ]?\s*[UC])?\b/) || [null, foundNumRaw])[1];
+
+    if (rawNumberFromText !== reqNum) continue;
+    if (reqSuffix && foundSuffix && foundSuffix !== reqSuffix) continue;
+    if (reqSuffix && !foundSuffix) continue;
+    return true;
+  }
 
   return false;
 }
 
-function extractInkNumber(query) {
-  const q = lower(query);
+function colorValueMatchesCanonicalInk(value, requestedInk) {
+  const requested = canonicalInkParts(requestedInk);
+  if (!requested) return false;
 
-  const explicit = q.match(/(?:ink\s*(?:number|#)?|pms|pantone|color)\s*#?\s*([0-9]{2,5}[a-z]?)(?:\s*(u|c))?/i);
-  if (explicit) return normalizePart(explicit[1] + (explicit[2] || ""));
+  const text = normalize(value).toUpperCase();
+  const matches = [...text.matchAll(/\b(?:PMS|PANTONE|INK|COLOR|COLOUR)?\s*0*([0-9]{1,4})(?:\s*[- ]?\s*([UC]))?\b/g)];
 
-  const formulaFor = q.match(/(?:formula|recipe)\s+(?:for\s+)?(?:ink\s*)?#?\s*([0-9]{2,5}[a-z]?)(?:\s*(u|c))?/i);
-  if (formulaFor) return normalizePart(formulaFor[1] + (formulaFor[2] || ""));
-
-  if (isInkFormulaQuestion(q)) {
-    const candidates = [...q.matchAll(/\b([0-9]{2,5}[a-z]?)(?:\s*(u|c))?\b/gi)];
-
-    for (const candidate of candidates) {
-      const full = candidate[0];
-      const start = candidate.index || 0;
-      const after = q.slice(start + full.length, start + full.length + 12);
-      const before = q.slice(Math.max(0, start - 10), start);
-
-      if (/^\s*(pounds|pound|lbs|lb)\b/i.test(after)) continue;
-      if (/\b(make|mix)\s*$/i.test(before)) continue;
-
-      return normalizePart(candidate[1] + (candidate[2] || ""));
-    }
+  for (const match of matches) {
+    const foundNum = String(Number(match[1]));
+    const foundSuffix = match[2] || "";
+    if (foundNum !== requested.numberNoLeadingZeros) continue;
+    if (requested.suffix && foundSuffix && foundSuffix !== requested.suffix) continue;
+    if (requested.suffix && !foundSuffix) continue;
+    return true;
   }
 
+  return false;
+}
+
+function getFieldValue(record, patterns) {
+  if (!record.fields) return "";
+  for (const [key, value] of Object.entries(record.fields)) {
+    if (patterns.some((pattern) => pattern.test(key))) return normalize(value);
+  }
   return "";
 }
 
-function isInkInventoryRecord(record) {
-  const keys = Object.keys(record.fields || {}).join(" ").toLowerCase();
-
-  return (
-    keys.includes("total weight") ||
-    keys.includes("container count") ||
-    keys.includes("last count") ||
-    keys.includes("weight lb")
-  );
+function getAllFieldText(record, includeSensitive = false) {
+  if (!record.fields) return "";
+  return Object.entries(record.fields)
+    .filter(([key]) => includeSensitive || !isSensitiveField(key))
+    .map(([key, value]) => `${key}: ${value}`)
+    .join(" | ");
 }
 
-function isFormulaIdentifierField(fieldName) {
-  const k = lower(fieldName);
-
-  return (
-    k === "pantone / color" ||
-    k === "pantone" ||
-    k === "pms" ||
-    k === "color" ||
-    k === "ink" ||
-    k === "formula" ||
-    k.includes("ink color number") ||
-    k.includes("formula number") ||
-    k.includes("pantone")
-  );
+function getRecordDescription(record) {
+  return getFieldValue(record, [/description/i, /item/i, /part\s*name/i, /name/i, /material/i, /component/i]) || record.title || "";
 }
 
-function colorValueMatchesInkNumber(value, inkNumber) {
-  const wanted = normalizePart(inkNumber);
-  const raw = normalize(value).toUpperCase();
-
-  if (!wanted || !raw) return false;
-
-  const normalized = normalizePart(raw);
-
-  if (new Set([wanted, "INK" + wanted, "PMS" + wanted, "PANTONE" + wanted]).has(normalized)) return true;
-
-  const match = wanted.match(/^(\d{2,5})([A-Z]?)$/);
-  if (!match) return normalized === wanted;
-
-  const digits = match[1];
-  const suffix = match[2];
-
-  if (suffix) {
-    return new RegExp("(^|[^0-9])" + digits + "\\s*" + suffix + "($|[^0-9])").test(raw);
-  }
-
-  return new RegExp("(^|[^0-9])" + digits + "\\s*(U|C)?($|[^0-9])").test(raw);
+function getRecordPartNumber(record) {
+  return getFieldValue(record, [/part\s*(number|#|no)/i, /^part$/i, /item\s*(number|#|no)/i, /^item$/i, /stock/i, /sku/i, /mfg/i, /model/i]) || "";
 }
 
-function recordColorMatchesInkNumber(record, inkNumber) {
-  if (!record.fields) return false;
+function getRecordLocation(record) {
+  return getFieldValue(record, [/location/i, /bin/i, /shelf/i, /cabinet/i, /drawer/i, /area/i]);
+}
 
+function getRecordQuantity(record) {
+  return getFieldValue(record, [/qty/i, /quantity/i, /on\s*hand/i, /count/i]);
+}
+
+function getInkColorText(record) {
+  if (!record.fields) return "";
+  const fields = [];
   for (const [key, value] of Object.entries(record.fields)) {
-    if (isFormulaIdentifierField(key) && colorValueMatchesInkNumber(value, inkNumber)) return true;
+    if (/(pantone|pms|color|colour|ink|formula)/i.test(key)) fields.push(value);
   }
-
-  return false;
+  return fields.join(" | ");
 }
 
-function findExactInkInventoryRecord(inkNumber) {
-  return knowledgeRecords.find((record) => {
-    return (
-      record.category === "03_INK_ROOM" &&
-      record.type === "spreadsheet-row" &&
-      isInkInventoryRecord(record) &&
-      recordColorMatchesInkNumber(record, inkNumber)
-    );
-  });
+function isInkRecord(record) {
+  return record.category === "03_INK_ROOM" || /ink/i.test(record.sourceFile || "") || /ink/i.test(record.title || "") || /pantone|pms|formula|color/i.test(getAllFieldText(record));
+}
+
+function isFormulaRecord(record) {
+  if (!isInkRecord(record)) return false;
+  const text = getAllFieldText(record, true) + " " + recordSearchText(record);
+  return /(formula|percent|component|blue|red|yellow|black|extender|varnish|violet|rubine|warm|process|eclipse)/i.test(text);
+}
+
+function isInventoryRecord(record) {
+  if (!isInkRecord(record)) return false;
+  const text = getAllFieldText(record, true) + " " + record.sourceFile;
+  return /(inventory|count|on\s*hand|container|containers|lb|lbs|pounds|quantity|qty)/i.test(text);
 }
 
 function findExactInkFormulaRecords(inkNumber) {
   return knowledgeRecords.filter((record) => {
-    return (
-      record.category === "03_INK_ROOM" &&
-      record.type === "spreadsheet-row" &&
-      !isInkInventoryRecord(record) &&
-      recordColorMatchesInkNumber(record, inkNumber)
-    );
+    if (!isFormulaRecord(record)) return false;
+    return colorValueMatchesExactInk(getInkColorText(record) + " | " + getAllFieldText(record), inkNumber);
   });
 }
 
-function parsePercentNumber(value) {
-  const match = normalize(value).match(/[-+]?\d+(?:\.\d+)?/);
-  if (!match) return null;
-
-  const n = Number(match[0]);
-  return Number.isFinite(n) ? n : null;
+function findCanonicalInkFormulaRecords(inkNumber) {
+  return knowledgeRecords.filter((record) => {
+    if (!isFormulaRecord(record)) return false;
+    return colorValueMatchesCanonicalInk(getInkColorText(record) + " | " + getAllFieldText(record), inkNumber);
+  });
 }
 
-function parseFormulaComponents(records) {
-  const components = [];
-  const seen = new Set();
+function findExactInkInventoryRecords(inkNumber) {
+  return knowledgeRecords.filter((record) => {
+    if (!isInventoryRecord(record)) return false;
+    return colorValueMatchesExactInk(getInkColorText(record) + " | " + getAllFieldText(record), inkNumber);
+  });
+}
 
-  function addComponent(component, percent) {
-    component = normalize(component).replace(/\s+/g, " ");
-    percent = Number(percent);
+function findCanonicalInkInventoryRecords(inkNumber) {
+  return knowledgeRecords.filter((record) => {
+    if (!isInventoryRecord(record)) return false;
+    return colorValueMatchesCanonicalInk(getInkColorText(record) + " | " + getAllFieldText(record), inkNumber);
+  });
+}
 
-    if (!component || !Number.isFinite(percent)) return;
+function findNearbyInkRecords(inkNumber) {
+  const requestedParts = canonicalInkParts(inkNumber);
+  if (!requestedParts) return [];
 
-    const key = lower(component) + "|" + percent.toFixed(4);
-    if (seen.has(key)) return;
-
-    seen.add(key);
-    components.push({ component, percent });
-  }
-
-  for (const record of records) {
-    const fields = record.fields || {};
-
-    const summary = getField(fields, ["Formula Percent Components", "Percent Components", "Formula Components", "Components"]);
-    if (summary) {
-      const pieces = summary.split(/;|\n/).map((x) => x.trim()).filter(Boolean);
-
-      for (const piece of pieces) {
-        const match = piece.match(/^(.+?)\s*:\s*([0-9.]+)\s*%?$/);
-        if (match) addComponent(match[1], Number(match[2]));
+  const candidates = [];
+  for (const record of knowledgeRecords) {
+    if (!isInkRecord(record)) continue;
+    const text = getInkColorText(record) + " | " + getAllFieldText(record);
+    const matches = [...normalize(text).toUpperCase().matchAll(/\b(?:PMS|PANTONE|INK|COLOR|COLOUR)?\s*([0-9]{1,4})(?:\s*[- ]?\s*([UC]))?\b/g)];
+    for (const match of matches) {
+      const candidateNum = match[1];
+      const candidateSuffix = match[2] || "";
+      if (candidateNum === requestedParts.numberRaw) continue;
+      const distance = levenshtein(requestedParts.numberNoLeadingZeros, String(Number(candidateNum)));
+      const contains = candidateNum.includes(requestedParts.numberNoLeadingZeros) || requestedParts.numberNoLeadingZeros.includes(candidateNum);
+      if (distance <= 1 || contains) {
+        candidates.push({
+          record,
+          label: candidateSuffix ? `${candidateNum} ${candidateSuffix}` : candidateNum,
+          distance: contains ? 2 : distance
+        });
       }
     }
+  }
 
-    const component = getField(fields, ["Component", "Ingredient", "Ink Component", "Material"]);
-    const percent = parsePercentNumber(getField(fields, ["Percent", "%", "Component Percent", "Percentage"]));
+  const seen = new Set();
+  return candidates
+    .sort((a, b) => a.distance - b.distance)
+    .filter((item) => {
+      const key = item.label + "|" + item.record.sourceFile + "|" + item.record.rowNumber;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 3);
+}
 
-    if (component && percent !== null) addComponent(component, percent);
+function parsePercentNumber(value) {
+  if (value === null || value === undefined) return null;
+  const text = normalize(value).replace("%", "");
+  const num = Number(text);
+  return Number.isFinite(num) ? num : null;
+}
+
+function extractFormulaComponents(record) {
+  if (!record.fields) return [];
+
+  const components = [];
+
+  for (const [key, value] of Object.entries(record.fields)) {
+    const k = normalize(key);
+    const v = normalize(value);
+    if (!v) continue;
+
+    if (/component/i.test(k) && /percent/i.test(k)) continue;
+
+    const directPercent = parsePercentNumber(v);
+    if (/(blue|red|yellow|black|extender|varnish|violet|rubine|warm|process|eclipse|methyl|orange|green|opaque|white)/i.test(k) && directPercent !== null && directPercent > 0 && directPercent <= 100) {
+      components.push({ name: k, percent: directPercent });
+    }
+  }
+
+  if (components.length) return components;
+
+  const text = getAllFieldText(record, true) + " | " + (record.body || "");
+  const pattern = /([A-Za-z0-9 :.\-\/]+?)\s*[:=]\s*(\d+(?:\.\d+)?)\s*%/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const name = normalize(match[1]).replace(/.*\|\s*/, "").trim();
+    const percent = Number(match[2]);
+    if (name && Number.isFinite(percent) && percent > 0 && percent <= 100) {
+      components.push({ name, percent });
+    }
   }
 
   return components;
 }
 
-function getFormulaLabel(records, inkNumber) {
-  for (const record of records) {
-    const fields = record.fields || {};
-    const label = getField(fields, ["Pantone / Color", "Pantone", "PMS", "Color", "Ink Color Number", "Formula"]);
-    if (label) return label;
-  }
-
-  return "Ink " + inkNumber;
-}
-
-function formatPounds(value) {
-  return Number(value).toFixed(2);
-}
-
-function answerCalculatedInkFormula(inkNumber, batchPounds) {
-  const exactFormulaRows = findExactInkFormulaRecords(inkNumber);
-
-  if (!exactFormulaRows.length) {
-    let reply = "I could not find a formula record for ink " + inkNumber + " in the current JARVIS ink files.";
-
-    const exactInventory = findExactInkInventoryRecord(inkNumber);
-    if (exactInventory) {
-      reply += "\n\nI did find inventory information:\n\n" + answerInkInventoryRow(exactInventory);
-      reply += "\n\nDo not guess a formula. Use the ink mixer system or contact Jonathan.";
-    } else {
-      reply += "\n\nI also could not confirm current inventory for that ink color.";
-    }
-
-    return reply;
-  }
-
-  const components = parseFormulaComponents(exactFormulaRows);
-  const label = getFormulaLabel(exactFormulaRows, inkNumber);
+function formatFormula(record, inkNumber, batchPounds) {
+  const components = extractFormulaComponents(record);
+  const label = exactInkLabel(inkNumber);
+  const title = getFieldValue(record, [/pantone/i, /pms/i, /color/i, /colour/i, /ink/i]) || label;
 
   if (!components.length) {
-    return "I found a formula record for " + label + ", but I could not read the component percentages cleanly. Use the ink mixer system or contact Jonathan.";
+    return [
+      `${title}`,
+      "",
+      "I found a formula record, but I could not safely parse the component percentages.",
+      "",
+      "Use the ink mixer system or flag this for Jonathan before mixing."
+    ].join("\n");
   }
 
-  let reply = label + " — " + formatPounds(batchPounds) + " lb batch\n\n";
+  const totalPercent = components.reduce((sum, component) => sum + component.percent, 0);
+  const lines = [];
+  lines.push(`${title} — ${batchPounds.toFixed(2)} lb batch`);
+  lines.push("");
+
   let total = 0;
-
-  for (const item of components) {
-    const pounds = batchPounds * (item.percent / 100);
+  for (const component of components) {
+    const pounds = batchPounds * (component.percent / 100);
     total += pounds;
-    reply += item.component + " = " + formatPounds(pounds) + " lb\n";
+    lines.push(`${component.name} = ${pounds.toFixed(2)} lb`);
   }
 
-  reply += "\nTotal = " + formatPounds(total) + " lb";
-  reply += "\n\nFlexo note: This is a starting mix. Extender may be needed once the job is on press. That is normal.";
+  lines.push("");
+  lines.push(`Total = ${total.toFixed(2)} lb`);
 
-  return reply;
+  if (Math.abs(totalPercent - 100) > 0.5) {
+    lines.push("");
+    lines.push(`Note: Formula percentages total ${totalPercent.toFixed(3)}%. Verify before mixing.`);
+  }
+
+  lines.push("");
+  lines.push("Flexo note: This is a starting mix. Extender may be needed once the job is on press. That is normal.");
+
+  return lines.join("\n");
 }
 
-function answerInkFormulaQuestion(query, context = {}) {
-  const inkNumber = extractInkNumber(query);
-  const batchSize = extractBatchSizePounds(query);
+function formatInkInventory(records, inkNumber) {
+  if (!records.length) return "";
 
-  if (!inkNumber) {
-    return "I need the exact ink/Pantone number to look up a formula safely. Example: make 10 lb of ink 186.";
+  let total = 0;
+  let containers = 0;
+  let lastCounted = "";
+  const detailLines = [];
+
+  for (const record of records) {
+    const qty = getFieldValue(record, [/total/i, /weight/i, /lb/i, /lbs/i, /pounds/i, /quantity/i, /qty/i, /on\s*hand/i]);
+    const numeric = Number(String(qty).replace(/[^\d.]/g, ""));
+    if (Number.isFinite(numeric)) total += numeric;
+
+    const cont = getFieldValue(record, [/container/i, /bucket/i, /count/i]);
+    const contNum = Number(String(cont).replace(/[^\d.]/g, ""));
+    if (Number.isFinite(contNum)) containers += contNum;
+
+    const counted = getFieldValue(record, [/last\s*count/i, /counted/i, /date/i]);
+    if (counted && (!lastCounted || counted > lastCounted)) lastCounted = counted;
+
+    const desc = getAllFieldText(record);
+    if (desc) detailLines.push(desc);
   }
 
-  const exactFormulaRows = findExactInkFormulaRecords(inkNumber);
+  const label = exactInkLabel(inkNumber);
+  const lines = [`Yes — ink ${label} is listed on hand.`, ""];
 
-  if (!exactFormulaRows.length) {
-    return answerCalculatedInkFormula(inkNumber, batchSize || 0);
+  if (total > 0) lines.push(`Total: ${total.toFixed(2)} lb`);
+  if (containers > 0) lines.push(`Containers: ${containers}`);
+  if (lastCounted) lines.push(`Last counted: ${lastCounted}`);
+
+  if (lines.length === 2 && detailLines.length) {
+    lines.push(detailLines[0]);
   }
 
-  if (!batchSize) {
-    if (context.from) {
-      pendingRequests.set(context.from, {
-        step: "awaiting_formula_batch_size",
-        requesterName: context.requesterName || "",
-        requesterPhone: context.from,
-        inkNumber
-      });
-    }
+  lines.push("");
+  lines.push("Please physically verify before relying on it for production.");
 
-    const label = getFormulaLabel(exactFormulaRows, inkNumber);
-
-    return (
-      "I found the formula for " + label + ".\n\n" +
-      "How many pounds do you want to make?" +
-      (context.from ? formulaBatchButtons() : "\n\nReply with something like: 10 lb")
-    );
-  }
-
-  return answerCalculatedInkFormula(inkNumber, batchSize);
+  return lines.join("\n");
 }
 
-function answerInkInventoryRow(top) {
-  const fields = top.fields || {};
+function summarizeRecord(record) {
+  if (record.fields) {
+    const part = getRecordPartNumber(record);
+    const desc = getRecordDescription(record);
+    const loc = getRecordLocation(record);
+    const qty = getRecordQuantity(record);
 
-  const color =
-    getField(fields, ["Ink Color Number", "Color", "Pantone", "PMS"]) ||
-    getField(fields, ["Formula Number"]) ||
-    "that ink";
-
-  const totalWeight = getField(fields, ["Total Weight lb", "Weight lb", "Weight", "Total Weight"]);
-  const containerCount = getField(fields, ["Container Count", "Containers", "Count"]);
-  const lastCountDate = getField(fields, ["Last Count Date", "Date Entered", "Count Date", "Last Updated"]);
-  const location = getField(fields, ["Location", "Bin", "Shelf"]);
-  const status = getField(fields, ["Status"]);
-
-  if (isBlankOrZero(totalWeight) && isBlankOrZero(containerCount)) {
-    let reply = "I found ink " + color + ", but the current snapshot does not show a clear usable quantity.";
-
-    if (status) reply += "\n\nStatus: " + status;
-    if (lastCountDate) reply += "\nLast counted: " + lastCountDate;
-
-    return reply + "\n\nPlease physically verify before relying on it for production.";
+    const lines = [];
+    if (part || desc) lines.push(`I found ${part || "a matching item"}${desc ? " — " + desc : ""}.`);
+    if (loc) lines.push(`Location: ${loc}`);
+    if (qty) lines.push(`Quantity: ${qty}`);
+    if (!lines.length) lines.push(getAllFieldText(record));
+    return lines.join("\n");
   }
 
-  let reply = "Yes — ink " + color + " is listed on hand.";
-
-  if (totalWeight) reply += "\n\nTotal: " + totalWeight + " lb";
-  if (containerCount) reply += "\nContainers: " + containerCount;
-  if (location) reply += "\nLocation: " + location;
-  if (lastCountDate) reply += "\nLast counted: " + lastCountDate;
-
-  return reply + "\n\nPlease physically verify before relying on it for production.";
+  return normalize(record.body || record.title || "I found a matching record.").slice(0, 900);
 }
 
-function answerInkQuestion(query) {
-  const inkNumber = extractInkNumber(query);
+function scoreRecordForQuery(record, query) {
+  const q = normalizeLoose(query);
+  const tokens = q.split(" ").filter((token) => token.length > 1 && !SEARCH_STOPWORDS.has(token));
+  const text = record.normalizedText || normalizeLoose(recordSearchText(record));
+  let score = 0;
 
-  if (inkNumber) {
-    const exactInventory = findExactInkInventoryRecord(inkNumber);
-    if (exactInventory) return answerInkInventoryRow(exactInventory);
+  for (const token of tokens) {
+    if (text.includes(token)) score += token.length >= 4 ? 3 : 1;
   }
 
-  const results = searchKnowledge(query, {
-    maxResults: 8,
-    categories: ["03_INK_ROOM"],
-    minScore: 25
-  });
+  const keys = extractSearchKeys(query);
+  for (const key of keys) {
+    if (record.searchKeys?.includes(key)) score += 15;
+    else if (normalizePart(text).includes(key)) score += 5;
+  }
 
-  const spreadsheetResults = results.filter((record) => record.type === "spreadsheet-row" && isInkInventoryRecord(record));
-  if (spreadsheetResults.length) return answerInkInventoryRow(spreadsheetResults[0]);
+  if (record.category === "01_PARTS_INVENTORY") score += 1;
+  if (record.category === "03_INK_ROOM" && hasInkLanguage(query)) score += 4;
+  if (record.category === "04_HVAC_AND_BUILDING" && /\b(hvac|thermostat|ac|air|heat|cool|cooling)\b/i.test(query)) score += 5;
+  if (record.category === "09_MAPS" && /\b(map|where|location|eyewash|extinguisher|thermostat)\b/i.test(query)) score += 4;
 
-  const guidanceResults = searchKnowledge(query, {
-    maxResults: 3,
-    categories: ["03_INK_ROOM"],
-    includeGuidance: true,
-    minScore: 25
-  });
-
-  if (guidanceResults.length) return answerFromTopResults(query, guidanceResults);
-
-  return "I could not find that ink in the current JARVIS ink files. If this affects production, call or text Jonathan.";
+  return score;
 }
 
-function getPartMatchConfidence(query, record) {
+function searchKnowledge(query, options = {}) {
+  const scored = [];
+  for (const record of knowledgeRecords) {
+    if (options.category && record.category !== options.category) continue;
+    if (options.predicate && !options.predicate(record)) continue;
+    const score = scoreRecordForQuery(record, query);
+    if (score > 0) scored.push({ record, score });
+  }
+
+  return scored.sort((a, b) => b.score - a.score).slice(0, options.limit || 8);
+}
+
+function findExactPartMatches(query) {
   const queryKeys = extractSearchKeys(query);
-  const recordKeys = record.searchKeys || [];
+  if (!queryKeys.length) return [];
 
-  for (const queryKey of queryKeys) {
-    for (const recordKey of recordKeys) {
-      if (queryKey === recordKey) return "exact";
-    }
-  }
+  return knowledgeRecords.filter((record) => {
+    if (record.category !== "01_PARTS_INVENTORY" && !/part|inventory/i.test(record.sourceFile || "")) return false;
+    const recordPart = normalizePart(getRecordPartNumber(record));
+    const recordTextPartKeys = record.searchKeys || [];
+    return queryKeys.some((key) => recordPart === key || recordTextPartKeys.includes(key));
+  });
+}
 
-  for (const queryKey of queryKeys) {
-    for (const recordKey of recordKeys) {
-      const queryDigitsOnly = digitsOnly(queryKey);
-      const recordDigitsOnly = digitsOnly(recordKey);
+function findNormalizedPartMatches(query) {
+  const queryKeys = extractSearchKeys(query);
+  if (!queryKeys.length) return [];
 
-      if (
-        queryKey.length >= 4 &&
-        recordKey.length >= 4 &&
-        queryKey[0] === recordKey[0] &&
-        queryDigitsOnly.length >= 4 &&
-        recordDigitsOnly.length >= 4 &&
-        (recordKey.includes(queryKey) || queryKey.includes(recordKey))
-      ) {
-        return "likely";
+  return knowledgeRecords.filter((record) => {
+    if (record.category !== "01_PARTS_INVENTORY" && !/part|inventory/i.test(record.sourceFile || "")) return false;
+    const recordPart = normalizePart(getRecordPartNumber(record));
+    if (!recordPart) return false;
+    return queryKeys.some((key) => recordPart === key);
+  });
+}
+
+function findFuzzyPartMatches(query) {
+  const queryKeys = extractSearchKeys(query).filter((key) => key.length >= 4);
+  if (!queryKeys.length) return [];
+
+  const candidates = [];
+
+  for (const record of knowledgeRecords) {
+    if (record.category !== "01_PARTS_INVENTORY" && !/part|inventory/i.test(record.sourceFile || "")) continue;
+
+    const part = normalizePart(getRecordPartNumber(record));
+    if (!part || part.length < 4) continue;
+
+    for (const key of queryKeys) {
+      const distance = levenshtein(key, part);
+      const maxAllowed = key.length <= 5 ? 1 : 2;
+      const containsPenalty = part.includes(key) || key.includes(part) ? 1 : 999;
+      const best = Math.min(distance, containsPenalty);
+
+      if (best <= maxAllowed) {
+        candidates.push({ record, score: best, requested: key, found: part });
       }
     }
   }
 
-  return "weak";
+  const seen = new Set();
+  return candidates
+    .sort((a, b) => a.score - b.score)
+    .filter((item) => {
+      const key = getRecordPartNumber(item.record) + "|" + item.record.sourceFile + "|" + item.record.rowNumber;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 3);
 }
 
-function answerPartsRow(top) {
-  const fields = top.fields || {};
+function findCommonSupplyMatches(query) {
+  const supplyName = extractCommonSupplyName(query);
+  const q = normalizeLoose(supplyName);
+  const qTokens = q.split(" ").filter(Boolean);
 
-  const partNumber =
-    getField(fields, ["Part Number", "Item Number", "Part", "Item", "Number"]) ||
-    getField(fields, ["Normalized Search Key"]);
+  const matches = [];
 
-  const description = getField(fields, ["Description", "Part Description", "Item Description"]);
-  const quantity = getField(fields, ["Quantity On Hand", "Qty On Hand", "Quantity", "Qty", "On Hand"]);
-  const location = getField(fields, ["Location", "Bin", "Shelf", "Cabinet"]);
-  const machine = getField(fields, ["Machine", "Machine / Area", "Area"]);
-  const status = getField(fields, ["Status"]);
+  for (const record of knowledgeRecords) {
+    if (record.category !== "01_PARTS_INVENTORY" && !/part|inventory|supply/i.test(record.sourceFile || "")) continue;
 
-  let reply = partNumber || description
-    ? "I found " + (partNumber || "a matching item") + (description ? " — " + description : "") + "."
-    : "I found a matching item.";
+    const desc = normalizeLoose(getRecordDescription(record));
+    const full = normalizeLoose(getRecordDescription(record) + " " + getAllFieldText(record));
+    const part = normalizePart(getRecordPartNumber(record));
 
-  if (quantity) reply += "\n\nQuantity on hand: " + quantity;
-  if (location) reply += "\nLocation: " + location;
-  if (machine) reply += "\nMachine / Area: " + machine;
-  if (status) reply += "\nStatus: " + status;
+    let score = 0;
 
-  return reply + "\n\nPlease physically verify before relying on it.";
-}
+    if (desc.includes(q)) score += 20;
+    else if (full.includes(q)) score += 12;
 
-function answerPartSearchResults(query, results, options = {}) {
-  if (!results.length) {
-    let reply =
-      "I could not find that item in the current JARVIS parts/supplies inventory.\n\n" +
-      "Would you like me to add it to Jonathan's Purchase Order Request list?";
-
-    if (options.includeButtons) reply += addMissingPartButtons();
-
-    return reply;
-  }
-
-  const confidence = getPartMatchConfidence(query, results[0]);
-
-  if (confidence === "exact") return answerPartsRow(results[0]);
-
-  let reply = "I did not find an exact match for that part/supply.\n\n";
-
-  reply += confidence === "likely"
-    ? "I found one likely match:\n\n"
-    : "I found one possible loose match, but I am not confident it is the same item:\n\n";
-
-  reply += answerPartsRow(results[0]);
-
-  if (options.includeButtons) return reply + "\n\nIs this the item you meant?" + partMatchButtons();
-
-  return reply + "\n\nIf this is not the item you meant, say: that is not it.";
-}
-
-function answerPartsLookup(query, context = {}) {
-  const results = searchKnowledge(query, {
-    maxResults: 6,
-    categories: ["01_PARTS_INVENTORY"],
-    minScore: looksLikePartNumber(query) ? 55 : 35
-  });
-
-  const candidatePartNumber =
-    extractCandidatePartNumber(query) ||
-    normalize(query).replace(/^i need (a |an |some )?/i, "").replace(/^need (a |an |some )?/i, "");
-
-  if (!results.length) {
-    if (context.from) {
-      pendingRequests.set(context.from, {
-        step: "confirm_add_missing_part",
-        requesterName: context.requesterName || "",
-        requesterPhone: context.from,
-        partNumber: candidatePartNumber,
-        partDescription: "",
-        originalQuery: query
-      });
+    for (const token of qTokens) {
+      if (token.length <= 1) continue;
+      if (desc.includes(token)) score += 5;
+      else if (full.includes(token)) score += 2;
     }
 
-    return (
-      "I could not find that item in the current JARVIS parts/supplies inventory.\n\n" +
-      "Would you like me to add it to Jonathan's Purchase Order Request list?" +
-      (context.from ? addMissingPartButtons() : "")
-    );
+    if (/\baa\b/.test(q) && /\b(aa|double a)\b/.test(full) && /batter/.test(full)) score += 20;
+    if (/\baaa\b/.test(q) && /\b(aaa|triple a)\b/.test(full) && /batter/.test(full)) score += 20;
+    if (/9v|9 volt/.test(q) && /9\s*v|9\s*volt/.test(full) && /batter/.test(full)) score += 20;
+
+    // Important guardrail:
+    // For common supplies, do NOT count random part-number matches as evidence.
+    if (score > 0 && part && qTokens.some((token) => token.length <= 3 && part.includes(token.toUpperCase()))) {
+      score -= 0;
+    }
+
+    if (score > 8) matches.push({ record, score });
   }
 
-  const confidence = getPartMatchConfidence(query, results[0]);
-
-  if (confidence !== "exact" && context.from) {
-    pendingRequests.set(context.from, {
-      step: "possible_part_match",
-      requesterName: context.requesterName || "",
-      requesterPhone: context.from,
-      partNumber: candidatePartNumber,
-      partDescription: "",
-      originalQuery: query,
-      possibleMatchSummary: answerPartsRow(results[0])
-    });
-  }
-
-  return answerPartSearchResults(query, results, {
-    includeButtons: context.from && confidence !== "exact"
-  });
+  return matches.sort((a, b) => b.score - a.score).slice(0, 5);
 }
 
-function extractSimplePartInfo(text) {
-  const cleaned = normalize(text)
-    .replace(/^i need (a |an |some )?/i, "")
-    .replace(/^need (a |an |some )?/i, "")
-    .replace(/^i need part/i, "")
-    .replace(/^request part/i, "")
-    .replace(/^add part/i, "")
-    .replace(/^need part/i, "")
-    .trim();
+function wantsToAddToPO(query) {
+  const q = normalizeLoose(query);
+  return q.includes("add to po") || q.includes("add original item") || q.includes("add it") || q.includes("order it") || q.includes("request it") || q.includes("purchase request") || q.includes("po request");
+}
 
-  const match = cleaned.match(/^([A-Za-z0-9\-_.\/]+)\s*(.*)$/);
+function isAffirmative(query) {
+  const q = normalizeLoose(query);
+  return ["yes", "y", "yeah", "yep", "correct", "that is it", "thats it", "this is it", "yes this is it", "use that", "yes use that"].includes(q);
+}
 
-  if (!match) return { partNumber: "", partDescription: cleaned || text };
+function isNegative(query) {
+  const q = normalizeLoose(query);
+  return ["no", "n", "nope", "not this", "not it", "wrong", "no not this item", "i meant something else"].includes(q);
+}
 
-  return {
-    partNumber: match[1] || "",
-    partDescription: match[2] || ""
+function getUserKey(req) {
+  return req.body?.From || req.ip || "web-user";
+}
+
+function makeButton(label, value) {
+  return `[button:${value}|${label}]`;
+}
+
+function withButtons(text, buttons) {
+  return `${text}\n\n${buttons.join("\n")}`;
+}
+
+function parseButtonMessage(message) {
+  const text = normalize(message);
+  const match = text.match(/^\[button:([^|\]]+)\|([^\]]+)\]$/);
+  if (match) return match[1];
+  return text;
+}
+const REQUEST_WEBHOOK_URL =
+  process.env.REQUEST_WEBHOOK_URL ||
+  process.env.PO_REQUEST_WEBHOOK_URL ||
+  process.env.GOOGLE_APPS_SCRIPT_URL ||
+  process.env.SHEET_WEBHOOK_URL ||
+  "";
+
+async function postToRequestSheet(payload) {
+  const finalPayload = {
+    timestamp: new Date().toISOString(),
+    source: "JARVIS",
+    appVersion: APP_VERSION,
+    ...payload
   };
-}
 
-function answerGenericSpreadsheetRow(top) {
-  const lines = [];
-
-  for (const [key, value] of Object.entries(safeFields(top.fields || {}, 8))) {
-    lines.push(key + ": " + value);
+  if (!REQUEST_WEBHOOK_URL) {
+    console.warn("No request webhook configured. Would have posted:", finalPayload);
+    return { ok: false, reason: "REQUEST_WEBHOOK_URL not configured", payload: finalPayload };
   }
 
-  return lines.length ? lines.join("\n") : "I found a matching record, but it does not have enough clean fields to summarize clearly.";
+  try {
+    const response = await fetch(REQUEST_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(finalPayload)
+    });
+
+    const text = await response.text();
+
+    if (!response.ok) {
+      console.error("Request webhook failed:", response.status, text);
+      return { ok: false, reason: `Webhook returned ${response.status}`, body: text, payload: finalPayload };
+    }
+
+    return { ok: true, body: text, payload: finalPayload };
+  } catch (error) {
+    console.error("Request webhook error:", error);
+    return { ok: false, reason: error.message, payload: finalPayload };
+  }
 }
 
-function answerFromTopResults(query, results) {
-  if (!results.length) {
-    return (
-      "I could not find that in the current JARVIS knowledge base.\n\n" +
-      "I should not guess. Try giving me a part number, item name, ink color, machine/area, vendor, order clue, map location, or schedule keyword. If this still needs a human, call or text Jonathan."
-    );
+function classifyUrgency(query) {
+  const q = normalizeLoose(query);
+  if (/\b(urgent|asap|right now|immediately|down|stopped|cannot run|cant run|can't run|line down|machine down|production stopped|emergency|unsafe|injury|spill|fire|smoke)\b/.test(q)) {
+    return "URGENT";
   }
-
-  const top = results[0];
-
-  if (top.type === "spreadsheet-row") {
-    if (top.category === "03_INK_ROOM") return isInkInventoryRecord(top) ? answerInkInventoryRow(top) : answerGenericSpreadsheetRow(top);
-    if (top.category === "01_PARTS_INVENTORY") return answerPartSearchResults(query, results);
-    return answerGenericSpreadsheetRow(top);
-  }
-
-  if (top.type === "file") {
-    return "I found the relevant file: " + top.title + linkLine(top) + "\n\nPlease verify the exact details in the file before relying on it.";
-  }
-
-  return makeExcerpt(top.body, query, 650);
+  return "NORMAL";
 }
 
-function answerPoRequest() {
-  const form = findPdfByName("po_request_form") || findPdfByName("po request form");
-
-  let reply =
-    "Here is the PO / POR request process:\n\n" +
-    "1. Fill out the PO Request Form.\n" +
-    "2. Attach the quote that supports the price used on the form.\n" +
-    "3. Email the completed form and quote to POR-Richmond@wearemoore.com.\n\n" +
-    "POR means Purchase Order Request / PO Request.\n\n" +
-    "Important: JARVIS cannot approve purchases, create POs, or say something has been ordered unless the approved order records clearly confirm it.";
-
-  if (form) reply += "\n\nBlank PO Request Form:\n" + form.url;
-
-  return reply;
+function shouldEscalateUrgent(query) {
+  return classifyUrgency(query) === "URGENT";
 }
 
-function answerPartOrderingProcess() {
+async function createEscalation(issue, details = {}) {
+  const priority = details.priority || classifyUrgency(issue);
+
+  return await postToRequestSheet({
+    requestType: "JARVIS ESCALATION",
+    priority,
+    status: "Needs Jonathan review",
+    item: details.item || "",
+    issue,
+    requester: details.requester || "JARVIS user",
+    machineOrArea: details.machineOrArea || "",
+    dueDate: details.dueDate || "",
+    notes: details.notes || "JARVIS could not solve this confidently. Escalate to Jonathan only."
+  });
+}
+
+async function createPORequest(item, details = {}) {
+  return await postToRequestSheet({
+    requestType: "PO REQUEST",
+    priority: details.priority || classifyUrgency(item),
+    status: "Needs Jonathan review",
+    item,
+    issue: details.issue || `User requested: ${item}`,
+    requester: details.requester || "JARVIS user",
+    machineOrArea: details.machineOrArea || "",
+    dueDate: details.dueDate || "",
+    notes: details.notes || "This does not mean the item has been ordered or approved. Jonathan must review."
+  });
+}
+
+function escalationConfirmationText(issue, result) {
+  if (result.ok) {
+    return [
+      "I flagged this for Jonathan to review.",
+      "",
+      "This does not mean anything has been ordered or approved yet. Jonathan will review it."
+    ].join("\n");
+  }
+
+  return [
+    "I tried to flag this for Jonathan, but I could not confirm that the request was written to the spreadsheet.",
+    "",
+    "Please try again or specifically ask for Jonathan’s number if this is urgent.",
+    "",
+    `Issue: ${issue}`
+  ].join("\n");
+}
+
+function shouldGiveJonathanPhone(query) {
+  const q = normalizeLoose(query);
   return (
-    "If we do not have a part or supply item, JARVIS can help add it to Jonathan's Purchase Order Request list.\n\n" +
-    "I need:\n" +
-    "- Part/item name or number\n" +
-    "- Description\n" +
-    "- Quantity needed\n" +
-    "- Machine or area\n" +
-    "- Requested due date\n" +
-    "- Any useful notes\n\n" +
-    "Important: this does not mean the item is ordered yet. Jonathan still needs to review it."
+    /\b(what is|whats|what's|give me|need|show me|tell me)\b.*\bjonathan\b.*\b(number|phone|cell|contact)\b/.test(q) ||
+    /\bjonathan\b.*\b(number|phone|cell)\b/.test(q) ||
+    /\b(call|text)\s+jonathan\b/.test(q) ||
+    /\bhow do i reach jonathan\b/.test(q)
   );
 }
 
-function getJonathanStatusDocument() {
-  return findDocumentByName("JONATHAN_STATUS_AND_CONTACT") || findDocumentByName("jonathan status") || null;
-}
-
-function getJonathanPhoneNumber() {
-  const doc = getJonathanStatusDocument();
-  const body = doc?.body || "";
-
-  const phoneMatch = body.match(/(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
-
-  if (phoneMatch) {
-    const phone = normalize(phoneMatch[0]);
-    if (!phone.includes("[") && !phone.toLowerCase().includes("enter")) return phone;
-  }
-
-  return JONATHAN_PHONE_FALLBACK;
-}
-
-function answerJonathanStatusQuestion(query) {
-  const phone = getJonathanPhoneNumber();
-
-  let reply =
-    "Jonathan is leaving " + JONATHAN_AWAY_START + " and is expected back " + JONATHAN_RETURN + ".\n\n" +
-    JONATHAN_TRAVEL_NOTE;
-
-  if (phone) {
-    reply += "\n\nFor routine questions, use JARVIS first. If JARVIS cannot help or the issue is urgent, Jonathan can be reached by call or text at " + phone + ".";
-  } else {
-    reply += "\n\nFor routine questions, use JARVIS first. If JARVIS cannot help, contact Jonathan when his contact number is available.";
-  }
-
-  if (!/(phone|number|contact|call|text|reach)/i.test(query)) {
-    reply += "\n\nFor normal parts requests, PO/POR questions, inventory checks, ink questions, maps, and routine issues, JARVIS can help capture or answer the question here.";
-  }
-
-  return reply;
-}
-
-function answerWasteInkQuestion() {
+function isJonathanEscalationIntent(query) {
+  const q = normalizeLoose(query);
   return (
-    "Call Potomac Environmental for waste ink pickup.\n\n" +
-    "Contact: Benjamin Kirby\n" +
-    "Phone: 804-812-5161\n" +
-    "Email: bkirby@potomacenv.com\n\n" +
-    "We usually call when 6 or more waste ink totes are ready. Pickup is not automatic.\n\n" +
-    "Before calling, count how many waste ink totes are ready. If storage is becoming a problem, call or text Jonathan."
+    /\b(ask|contact|get|tell|notify|flag|escalate|send|message)\s+jonathan\b/.test(q) ||
+    /\bjonathan\s+(help|review|needs to know)\b/.test(q) ||
+    /\bneed\s+jonathan\b/.test(q) ||
+    /\bask jonathan for help\b/.test(q)
   );
 }
 
-function answerVendorContactQuestion(query) {
-  const q = lower(query);
+function answerJonathanStatus(query) {
+  const q = normalizeLoose(query);
 
-  if (q.includes("crystal clean") || q.includes("heritage") || q.includes("parts washer") || q.includes("richard") || q.includes("rich hine")) {
-    return (
-      "Crystal Clean parts washer service:\n\n" +
-      "Richard \"Rich\" Hinegardner\n" +
-      "Phone: 847-836-5670\n" +
-      "Cell: 804-400-6876\n\n" +
-      "Text is okay for non-emergencies.\n" +
+  if (shouldGiveJonathanPhone(query)) {
+    return `Jonathan can be reached by call or text at ${JONATHAN_PHONE_FALLBACK}.`;
+  }
+
+  if (/\b(vacation|away|gone|out|back|return|coming back|where is jonathan|when is jonathan)\b/.test(q)) {
+    return [
+      `Jonathan is leaving ${JONATHAN_AWAY_START}.`,
+      JONATHAN_TRAVEL_NOTE,
+      `Jonathan is expected back ${JONATHAN_RETURN}.`,
+      "",
+      "Use JARVIS first. If JARVIS cannot solve the issue, it will flag the issue for Jonathan to review."
+    ].join("\n");
+  }
+
+  return "";
+}
+
+function isActiveEmergency(query) {
+  const q = normalizeLoose(query);
+  return /\b(fire|smoke|injury|bleeding|chemical exposure|chemical in eye|eyes|burn|explosion|active leak|gas smell|evacuate|emergency)\b/.test(q);
+}
+
+function answerActiveEmergency(query) {
+  if (!isActiveEmergency(query)) return "";
+
+  return [
+    "This sounds like an immediate safety issue.",
+    "",
+    "Follow site emergency procedures now.",
+    "",
+    "After the immediate situation is controlled, JARVIS can flag the issue for Jonathan."
+  ].join("\n");
+}
+
+function answerVagueInkRequest() {
+  return withButtons(
+    [
+      "What ink help do you need?",
+      "",
+      "You can ask like:",
+      "- Do we have ink 186?",
+      "- Make 10 lb of ink 186",
+      "- Formula for Pantone 2935 U",
+      "- Who do I call at INX?",
+      "- Who do I call for waste ink pickup?"
+    ].join("\n"),
+    [
+      makeButton("Check ink inventory", "check ink inventory"),
+      makeButton("Make ink formula", "make ink formula"),
+      makeButton("INX contact", "inx contact"),
+      makeButton("Waste ink pickup", "waste ink pickup")
+    ]
+  );
+}
+
+function answerWasteInkPickup(query) {
+  const q = normalizeLoose(query);
+  if (!/\b(waste ink|potomac|pickup|pick up|picked up|tote|totes|disposal)\b/.test(q)) return "";
+
+  if (q.includes("potomac") || q.includes("waste ink") || /\bpick\s*up\b/.test(q) || q.includes("pickup") || q.includes("tote")) {
+    return [
+      "Call Potomac Environmental for waste ink pickup.",
+      "",
+      "Contact: Benjamin Kirby",
+      "Phone: 804-812-5161",
+      "Email: bkirby@potomacenv.com",
+      "",
+      "We usually call when 6 or more waste ink totes are ready. Pickup is not automatic.",
+      "",
+      "Before calling, count how many waste ink totes are ready. If storage is becoming a problem, JARVIS can flag it for Jonathan."
+    ].join("\n");
+  }
+
+  return "";
+}
+
+function answerVendorContact(query) {
+  const q = normalizeLoose(query);
+
+  if (/\b(crystal clean|heritage crystal|heritage-crystal|parts washer|rich hine|hinegardner|richard)\b/.test(q)) {
+    return [
+      "Crystal Clean / Heritage-Crystal Clean contact:",
+      "",
+      'Richard "Rich" Hinegardner',
+      "Phone: 847-836-5670",
+      "Cell: 804-400-6876",
+      "",
+      "Text is okay for non-emergencies.",
       "Emergency number: 800-424-9300"
-    );
+    ].join("\n");
   }
 
-  if (q.includes("potomac") || q.includes("waste ink")) return answerWasteInkQuestion();
+  if (/\b(inx|ink vendor|premade ink|pre made ink|pre-made ink)\b/.test(q)) {
+    const results = searchKnowledge("INX ink vendor premade contact", {
+      category: "03_INK_ROOM",
+      limit: 4,
+      predicate: (record) => /vendor|contact|inx|premade/i.test(recordSearchText(record))
+    });
 
-  const results = searchKnowledge(query, {
-    maxResults: 3,
-    categories: ["03_INK_ROOM"],
-    includeGuidance: true,
-    minScore: 35
+    if (results.length) {
+      const best = results[0].record;
+      return [
+        "Here is the INX / ink vendor information I found:",
+        "",
+        summarizeRecord(best),
+        "",
+        "If this does not answer the question, JARVIS can flag it for Jonathan."
+      ].join("\n");
+    }
+  }
+
+  return "";
+}
+
+function answerCopperWastewater(query) {
+  const q = normalizeLoose(query);
+  if (!/\b(copper|henrico|wastewater|wash up|wash-up|discharge|water test|copper test)\b/.test(q)) return "";
+
+  const copperRecords = searchKnowledge("Henrico copper wastewater wash-up discharge 24 48 72 test", {
+    category: "03_INK_ROOM",
+    limit: 3,
+    predicate: (record) => /copper|henrico|wastewater|discharge|wash/i.test(recordSearchText(record))
   });
 
-  if (results.length) return makeExcerpt(results[0].body, query, 550);
-
-  return "I could not find that vendor contact. Try the vendor name, service type, or call/text Jonathan if this is urgent.";
-}
-
-function answerHvacQuestion(query) {
-  const serviceLog = findDocumentByName("HVAC_service_log") || findDocumentByName("HVAC service log");
-  const q = lower(query);
-
-  if (serviceLog) {
-    return makeExcerpt(serviceLog.body, query, 900) + "\n\nIf this is urgent, production-impacting, or conditions are getting unsafe, call or text Jonathan.";
+  if (copperRecords.length) {
+    const excerpt = summarizeRecord(copperRecords[0].record);
+    return [
+      excerpt,
+      "",
+      "Important: this is an active testing/remediation project. Do not treat it as final approval to discharge water.",
+      "",
+      "If this is urgent or about what to do with wastewater right now, JARVIS will flag it for Jonathan."
+    ].join("\n");
   }
 
-  if (q.includes("james river") || q.includes("envelope") || q.includes("units down") || q.includes("unit down") || q.includes("ac") || q.includes("hvac")) {
-    return (
-      "Envelope Department HVAC note:\n\n" +
-      "5 of the 6 main AC units over the envelope department are currently down. James River HVAC is scheduled to come out Monday, June 15, 2026 to diagnose and repair them.\n\n" +
-      "If this is urgent, production-impacting, or conditions are getting unsafe, call or text Jonathan."
-    );
-  }
-
-  return "I do not have a detailed HVAC service log loaded yet. Use the thermostat map for location questions, and call or text Jonathan if the issue is urgent or production-impacting.";
+  return [
+    "Henrico County warned that the wash-up discharge water contains too much copper.",
+    "",
+    "Jonathan is testing whether copper stays bound to ink solids and settles to the bottom. The current test uses a 5-gallon bucket and a large wash-up tote, with copper tests on the top 50% of the water column after 24, 48, and 72 hours.",
+    "",
+    "If settling alone is not enough, the next steps are another gravity-fed stage and then active filtration if needed.",
+    "",
+    "Final results need lab confirmation before anything is submitted to Henrico County.",
+    "",
+    "JARVIS should flag urgent wastewater questions for Jonathan."
+  ].join("\n");
 }
 
 function answerMapQuestion(query) {
-  const q = lower(query);
+  const q = normalizeLoose(query);
 
-  if (q.includes("thermostat") || q.includes("temperature") || q.includes("turn the temperature") || q.includes("turn temperature")) {
-    return (
-      "Use the thermostat map below to find the thermostat for that area." +
-      imageLine(HVAC_THERMOSTAT_IMAGE) +
-      "\n\nIf the map is unclear, try the nearest labeled thermostat first. If this is urgent or affecting production, call or text Jonathan."
-    );
+  if (/\b(thermostat|thermostats)\b/.test(q)) {
+    return [
+      "Here is the thermostat location map:",
+      "",
+      `[image:${HVAC_THERMOSTAT_IMAGE}]`,
+      "",
+      "If this does not answer the question, JARVIS can flag it for Jonathan."
+    ].join("\n");
   }
 
-  if (q.includes("eyewash") || q.includes("eye wash")) {
-    return (
-      "Eye wash station locations are shown on the map below.\n\n" +
-      "If this is an active chemical exposure or injury, follow emergency procedures and notify the on-shift supervisor immediately." +
-      imageLine(EYEWASH_IMAGE)
-    );
+  if (/\b(eyewash|eye wash|eye station|eye stations)\b/.test(q)) {
+    return [
+      "Here is the eyewash station map:",
+      "",
+      `[image:${EYEWASH_IMAGE}]`,
+      "",
+      "If this does not answer the question, JARVIS can flag it for Jonathan."
+    ].join("\n");
   }
 
-  if (q.includes("fire extinguisher") || q.includes("extinguisher")) {
-    return (
-      "Fire extinguisher locations are shown on the map below.\n\n" +
-      "If this is an active fire, smoke, or burning smell situation, follow emergency procedures and notify the on-shift supervisor immediately." +
-      imageLine(FIRE_EXTINGUISHER_IMAGE)
-    );
+  if (/\b(fire extinguisher|extinguisher|extinguishers)\b/.test(q)) {
+    return [
+      "Here is the fire extinguisher map:",
+      "",
+      `[image:${FIRE_EXTINGUISHER_IMAGE}]`,
+      "",
+      "If this does not answer the question, JARVIS can flag it for Jonathan."
+    ].join("\n");
   }
 
-  return "I can show maps for thermostat locations, eye wash stations, and fire extinguishers.";
+  return "";
 }
 
-function answerScheduleQuestion() {
-  const scheduleFile = findPdfByName("2-2-3") || findPdfByName("schedule");
+function answerHvacQuestion(query) {
+  const q = normalizeLoose(query);
+  if (!/\b(hvac|thermostat|ac|a c|air conditioning|cooling|hot|heat|james river|rtu|unit|units)\b/.test(q)) return "";
 
-  return (
-    "The 2-2-3 schedule is for day shift only and starts June 14, 2026. Night shift remains unchanged.\n\n" +
-    "Use the schedule calendar PDF to check specific days." +
-    (scheduleFile ? linkLine(scheduleFile) : "")
-  );
-}
+  if (q.includes("thermostat")) return answerMapQuestion(query);
 
-function isWasteInkQuestion(msg) {
-  const q = lower(msg);
+  const logRecords = searchKnowledge("HVAC service log James River 5 of 6 AC units down envelope department", {
+    category: "04_HVAC_AND_BUILDING",
+    limit: 3,
+    predicate: (record) => /hvac|service|james river|ac|cooling|unit/i.test(recordSearchText(record))
+  });
 
-  return (
-    q.includes("potomac") ||
-    q.includes("waste ink") ||
-    q.includes("waste tote") ||
-    q.includes("wastewater") ||
-    q.includes("waste water") ||
-    q.includes("used ink") ||
-    q.includes("ink waste") ||
-    q.includes("ink disposal") ||
-    (
-      q.includes("ink") &&
-      (
-        q.includes("pickup") ||
-        q.includes("pick up") ||
-        q.includes("picked up") ||
-        q.includes("disposal") ||
-        q.includes("dispose") ||
-        q.includes("environmental") ||
-        q.includes("who picks up") ||
-        q.includes("who pick up")
-      )
-    )
-  );
-}
-
-function isVendorContactQuestion(msg) {
-  const q = lower(msg);
-  const asksContact = q.includes("phone") || q.includes("number") || q.includes("cell") || q.includes("contact") || q.includes("who do i call") || q.includes("call") || q.includes("email");
-
-  return asksContact && (
-    q.includes("crystal clean") ||
-    q.includes("heritage") ||
-    q.includes("parts washer") ||
-    q.includes("richard") ||
-    q.includes("rich hine") ||
-    q.includes("potomac") ||
-    q.includes("waste ink")
-  );
-}
-
-function isHvacQuestion(msg) {
-  const q = lower(msg);
-
-  return (
-    q.includes("hvac") ||
-    q.includes("a/c") ||
-    q.includes(" ac ") ||
-    q.startsWith("ac ") ||
-    q.includes("air conditioning") ||
-    q.includes("cooling") ||
-    q.includes("james river") ||
-    q.includes("service call") ||
-    q.includes("service history") ||
-    q.includes("units down") ||
-    q.includes("unit down") ||
-    q.includes("envelope ac") ||
-    q.includes("envelope department ac")
-  );
-}
-
-function isJonathanStatusQuestion(msg) {
-  const q = lower(msg);
-
-  return (
-    (
-      q.includes("jonathan") &&
-      (
-        q.includes("vacation") ||
-        q.includes("back") ||
-        q.includes("return") ||
-        q.includes("leaving") ||
-        q.includes("away") ||
-        q.includes("out") ||
-        q.includes("phone") ||
-        q.includes("number") ||
-        q.includes("contact") ||
-        q.includes("call") ||
-        q.includes("text") ||
-        q.includes("reach")
-      )
-    ) ||
-    q.includes("when is jonathan back") ||
-    q.includes("when will jonathan be back") ||
-    q.includes("how do i reach jonathan") ||
-    q.includes("call jonathan") ||
-    q.includes("text jonathan") ||
-    q.includes("jonathan's number") ||
-    q.includes("jonathan phone") ||
-    q.includes("jonathan contact")
-  );
-}
-
-function isCommonSupplyRequest(msg) {
-  const q = normalizeLoose(msg);
-  const startsLikeNeed = q.startsWith("i need ") || q.startsWith("need ") || q.startsWith("we need ") || q.startsWith("can i get ") || q.startsWith("where are ") || q.startsWith("where is ") || q.startsWith("do we have ");
-
-  return startsLikeNeed && COMMON_SUPPLY_WORDS.some((word) => q.includes(word));
-}
-
-function isPurchaseOrderPolicyQuestion(msg) {
-  const q = lower(msg);
-
-  return (
-    q.includes("po request") ||
-    q.includes("por request") ||
-    q.includes("purchase order request") ||
-    q.includes("blank po") ||
-    q.includes("blank por") ||
-    q.includes("po form") ||
-    q.includes("por form") ||
-    q.includes("purchase order form") ||
-    q.includes("por-richmond") ||
-    q.includes("po process") ||
-    q.includes("por process") ||
-    q.includes("request a po") ||
-    q.includes("request a por") ||
-    q.includes("submit a po") ||
-    q.includes("submit a por") ||
-    q.includes("how do i request a po") ||
-    q.includes("how do i request a por") ||
-    (q.includes("request form") && (q.includes("po") || q.includes("por") || q.includes("purchase")))
-  );
-}
-
-function isPartOrderingProcessQuestion(msg) {
-  const q = lower(msg);
-
-  return (
-    (
-      q.includes("how do i order") ||
-      q.includes("how to order") ||
-      q.includes("order a part") ||
-      q.includes("part we dont have") ||
-      q.includes("part we don't have") ||
-      q.includes("need a part we dont have") ||
-      q.includes("need a part we don't have") ||
-      q.includes("request a part") ||
-      q.includes("add a part")
-    ) &&
-    (q.includes("part") || q.includes("parts") || q.includes("bearing") || q.includes("item"))
-  );
-}
-
-function isPartRequestStart(msg) {
-  const q = lower(msg);
-
-  return (
-    q.startsWith("i need part") ||
-    q.startsWith("need part") ||
-    q.startsWith("request part") ||
-    q.startsWith("add part")
-  );
-}
-
-function isCancelIntent(msg) {
-  const q = lower(msg);
-
-  return ["cancel", "stop", "never mind", "nevermind", "start over", "new question", "clear", "reset", "no", "nope"].includes(q);
-}
-
-function isYesIntent(msg) {
-  const q = lower(msg);
-
-  return ["yes", "y", "yeah", "yep", "please", "please do", "do it", "go ahead"].includes(q) || q.includes("yes add") || q.includes("please add");
-}
-
-function isAddToPoIntent(msg) {
-  const q = lower(msg);
-
-  return ["add it", "add this", "add original part", "add to po request", "add to por", "add to por request"].includes(q) || q.includes("add original") || q.includes("add to po") || q.includes("add to jonathan");
-}
-
-function isWrongPartIntent(msg) {
-  const q = lower(msg);
-
-  return (
-    q === "no" ||
-    q === "nope" ||
-    q.includes("not the right part") ||
-    q.includes("wrong part") ||
-    q.includes("not right") ||
-    q.includes("not it") ||
-    q.includes("not the same") ||
-    q.includes("that is not") ||
-    q.includes("that's not")
-  );
-}
-
-function looksLikeDueDateOrUrgency(msg) {
-  const q = lower(msg);
-
-  if (
-    q.includes("asap") ||
-    q.includes("urgent") ||
-    q.includes("today") ||
-    q.includes("tomorrow") ||
-    q.includes("this week") ||
-    q.includes("next week") ||
-    q.includes("within 2 weeks") ||
-    q.includes("within two weeks") ||
-    q.includes("next monday") ||
-    q.includes("next tuesday") ||
-    q.includes("next wednesday") ||
-    q.includes("next thursday") ||
-    q.includes("next friday") ||
-    q.includes("next saturday") ||
-    q.includes("next sunday")
-  ) {
-    return true;
+  if (logRecords.length) {
+    return [
+      summarizeRecord(logRecords[0].record),
+      "",
+      "If this is urgent, unsafe, or production-impacting, JARVIS can flag it for Jonathan."
+    ].join("\n");
   }
 
-  return /\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b/.test(q) || /\b\d{4}-\d{2}-\d{2}\b/.test(q);
+  return [
+    "Current HVAC note:",
+    "",
+    "5 of the 6 main AC units over the envelope department are currently down. James River HVAC is scheduled to come out Monday, June 15, 2026 to diagnose and repair them.",
+    "",
+    "If this is urgent, unsafe, or production-impacting, JARVIS can flag it for Jonathan."
+  ].join("\n");
 }
 
-function looksLikeMachineOrArea(msg) {
-  const q = lower(msg);
+function answerKnifeQuestion(query) {
+  if (!hasExplicitKnifeLanguage(query)) return "";
 
-  if (/\b(102|202|627-1|627-2|627-3|6271|6272|6273)\b/.test(q)) return true;
+  const results = searchKnowledge(query, {
+    category: "05_KNIVES",
+    limit: 5
+  });
 
-  return (
-    q.includes("wh1") ||
-    q.includes("wh2") ||
-    q.includes("wh3") ||
-    q.includes("wh4") ||
-    q.includes("warehouse") ||
-    q.includes("ink room") ||
-    q.includes("maintenance") ||
-    q.includes("prepress") ||
-    q.includes("pre-press") ||
-    q.includes("mailshop") ||
-    q.includes("shipping") ||
-    q.includes("receiving") ||
-    q.includes("safety") ||
-    q.includes("office") ||
-    q.includes("hvac") ||
-    q.includes("envelope")
-  );
+  if (!results.length) return "";
+
+  return [
+    "Here is what I found in the knife records:",
+    "",
+    ...results.slice(0, 3).map((result) => summarizeRecord(result.record)),
+    "",
+    "Please physically verify before relying on it for production."
+  ].join("\n\n");
 }
 
-function looksLikeNewQuestion(msg) {
-  const q = lower(msg);
+function answerMagnaQuestion(query) {
+  const q = normalizeLoose(query);
+  if (!/\b(magna|motor|drive|rebuild|rebuilt|resurfacing|repair)\b/.test(q)) return "";
 
-  if (q.includes("?")) return true;
+  const results = searchKnowledge(query, {
+    category: "07_MAGNA_REBUILDS",
+    limit: 5
+  });
 
-  if (
-    q.startsWith("where ") ||
-    q.startsWith("what ") ||
-    q.startsWith("who ") ||
-    q.startsWith("when ") ||
-    q.startsWith("how ") ||
-    q.startsWith("do we ") ||
-    q.startsWith("did ") ||
-    q.startsWith("does ") ||
-    q.startsWith("can ")
-  ) {
-    return true;
+  if (!results.length) return "";
+
+  return [
+    "Here is what I found in the Magna rebuild records:",
+    "",
+    ...results.slice(0, 3).map((result) => summarizeRecord(result.record)),
+    "",
+    "If this does not answer the question, JARVIS can flag it for Jonathan."
+  ].join("\n\n");
+}
+
+function answerScheduleQuestion(query) {
+  const q = normalizeLoose(query);
+  if (!/\b(2 2 3|223|schedule|shift|sunday|saturday|calendar|pierre|joe|jerry)\b/.test(q)) return "";
+
+  const results = searchKnowledge(query, {
+    category: "11_2-2-3_Schedule",
+    limit: 5
+  });
+
+  if (!results.length) return "";
+
+  return [
+    "Here is what I found in the schedule notes:",
+    "",
+    ...results.slice(0, 3).map((result) => summarizeRecord(result.record)),
+    "",
+    "If this does not answer the question, JARVIS can flag it for Jonathan."
+  ].join("\n\n");
+}
+
+function answerAniloxQuestion(query) {
+  const q = normalizeLoose(query);
+  if (!/\b(anilox|roller|rollers|volume|lpi|lines per inch|resurface|resurfacing)\b/.test(q)) return "";
+
+  const results = searchKnowledge(query, {
+    category: "03_INK_ROOM",
+    limit: 5,
+    predicate: (record) => /anilox|roller|volume|lpi|lines per inch|resurface/i.test(recordSearchText(record))
+  });
+
+  if (!results.length) {
+    return [
+      "I do not have the Anilox roller spreadsheet loaded yet.",
+      "",
+      "JARVIS needs the Anilox roller list before it can answer roller ID, volume, lines-per-inch, or resurfacing status questions.",
+      "",
+      "I flagged this as a reminder for Jonathan."
+    ].join("\n");
   }
 
-  return (
-    isPurchaseOrderPolicyQuestion(q) ||
-    isWasteInkQuestion(q) ||
-    isVendorContactQuestion(q) ||
-    isJonathanStatusQuestion(q) ||
-    isHvacQuestion(q) ||
-    q.includes("ink") ||
-    q.includes("thermostat") ||
-    q.includes("temperature") ||
-    q.includes("eyewash") ||
-    q.includes("fire extinguisher")
-  );
+  return [
+    "Here is what I found in the Anilox roller records:",
+    "",
+    ...results.slice(0, 4).map((result) => summarizeRecord(result.record)),
+    "",
+    "Please physically verify before relying on it for production."
+  ].join("\n\n");
 }
 
-function classifyIntent(msg) {
-  const q = lower(msg);
+function answerPartsOrSupplyQuestion(query, userKey) {
+  const q = normalizeLoose(query);
 
-  if (q === "" || q === "help") return "help";
-  if (isJonathanStatusQuestion(q)) return "jonathan_status";
-  if (isVendorContactQuestion(q)) return "vendor_contact";
-  if (isPurchaseOrderPolicyQuestion(q)) return "po_policy";
-  if (isPartOrderingProcessQuestion(q)) return "part_ordering_process";
-  if (isWasteInkQuestion(q)) return "waste_ink";
-  if (isInkFormulaQuestion(q)) return "ink_formula";
-  if (q.includes("ink") || q.includes("pantone") || q.includes("pms") || q.includes("drawdown") || q.includes("extender") || q.includes("inx")) return "ink";
-  if (isPartRequestStart(q) || isCommonSupplyRequest(q)) return "part_request_start";
-  if (q.includes("2-2-3") || q.includes("schedule") || q.includes("day shift") || q.includes("night shift")) return "schedule";
-  if (q.includes("thermostat") || q.includes("temperature") || q.includes("eyewash") || q.includes("eye wash") || q.includes("fire extinguisher") || q.includes("extinguisher") || q.includes("map")) return "map";
-  if (isHvacQuestion(q)) return "hvac";
-  if (q.includes("ordered") || q.includes("open order") || q.includes("coming") || q.includes("received yet")) return "open_orders";
-  if (q.includes("magna") || q.includes("motor") || q.includes("drive") || q.includes("rebuild")) return "magna";
-  if (q.includes("warehouse 4") || q.includes("wh4") || q.includes("mailshop") || q.includes("building 4") || q.includes("stamper") || q.includes("fire jet")) return "mailshop";
-  if (q.includes("forklift") || q.includes("certified") || q.includes("operator") || q.includes("certification") || q.includes("training")) return "safety";
-  if (hasExplicitKnifeLanguage(q)) return "knives";
-  if (looksLikePartNumber(q) || q.includes("do we have") || q.includes("where is") || q.includes("looking for") || q.includes("find") || q.includes("on hand") || q.includes("available") || q.includes("part")) return "parts_lookup";
+  const partSupplyLanguage = /\b(part|parts|bearing|belt|sensor|switch|relay|motor|gear|chain|sprocket|valve|cylinder|hose|filter|supply|supplies|need|have|stock|inventory|where is|where are)\b/.test(q);
+  const commonSupply = containsCommonSupplyWord(query);
 
-  return "fallback";
-}
+  if (!partSupplyLanguage && !looksLikePartNumber(query) && !commonSupply) return "";
 
-function isHighPriorityDueDate(dueDateText) {
-  const text = lower(dueDateText);
+  if (commonSupply) {
+    const supplyName = extractCommonSupplyName(query);
+    const matches = findCommonSupplyMatches(query);
 
-  if (["asap", "urgent", "today", "tomorrow", "this week", "next week", "within 2 weeks", "within two weeks", "down machine", "machine down", "cannot run", "production stopped"].some((phrase) => text.includes(phrase))) return true;
+    if (matches.length) {
+      const best = matches[0].record;
+      return [
+        `${supplyName} may be listed in inventory:`,
+        "",
+        summarizeRecord(best),
+        "",
+        "Please physically verify before relying on it."
+      ].join("\n");
+    }
 
-  const match = text.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
-  if (!match) return false;
-
-  const now = new Date();
-  let year = match[3] ? Number(match[3]) : now.getFullYear();
-  if (year < 100) year += 2000;
-
-  const due = new Date(year, Number(match[1]) - 1, Number(match[2]));
-
-  return (due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24) <= 14;
-}
-
-async function sendTeamsAlert(message) {
-  const teamsWebhook = process.env.TEAMS_WEBHOOK_URL;
-
-  if (!teamsWebhook) return false;
-
-  try {
-    await fetch(teamsWebhook, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: message })
+    pendingRequests.set(userKey, {
+      step: "confirm_add_supply_to_po",
+      item: supplyName,
+      originalQuery: query
     });
 
-    return true;
-  } catch (error) {
-    console.error("Teams alert failed:", error);
-    return false;
-  }
-}
-
-async function writePartsRequestToSheet(request) {
-  const webhookUrl = process.env.PARTS_REQUEST_WEBHOOK_URL;
-  const secret = process.env.PARTS_REQUEST_SECRET;
-
-  if (!webhookUrl || !secret) {
-    return { ok: false, error: "Missing spreadsheet webhook configuration" };
+    return withButtons(
+      [
+        `I could not find ${supplyName} in the current parts/supplies inventory.`,
+        "",
+        `Would you like me to add ${supplyName} to Jonathan’s Purchase Order Request list?`
+      ].join("\n"),
+      [
+        makeButton("Add to PO request", "add to po"),
+        makeButton("Cancel", "cancel")
+      ]
+    );
   }
 
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ secret, ...request })
+  if (looksLikePartNumber(query)) {
+    const exact = findExactPartMatches(query);
+    if (exact.length) {
+      return [
+        "I found an exact or normalized part match:",
+        "",
+        summarizeRecord(exact[0]),
+        "",
+        "Please physically verify before relying on it."
+      ].join("\n");
+    }
+
+    const normalized = findNormalizedPartMatches(query);
+    if (normalized.length) {
+      return [
+        "I found a normalized part match:",
+        "",
+        summarizeRecord(normalized[0]),
+        "",
+        "Please physically verify before relying on it."
+      ].join("\n");
+    }
+
+    const fuzzy = findFuzzyPartMatches(query);
+    if (fuzzy.length) {
+      const item = fuzzy[0];
+      pendingRequests.set(userKey, {
+        step: "confirm_fuzzy_part",
+        originalQuery: query,
+        suggestedRecord: item.record,
+        requested: item.requested,
+        found: item.found
+      });
+
+      return withButtons(
+        [
+          "I did not find an exact match for that part.",
+          "",
+          "I found one possible close match, but I am not confident it is the same item:",
+          "",
+          summarizeRecord(item.record),
+          "",
+          "Please physically verify before relying on it.",
+          "",
+          "Is this the item you meant?"
+        ].join("\n"),
+        [
+          makeButton("Yes, this is it", "yes fuzzy part"),
+          makeButton("No, not this item", "no fuzzy part"),
+          makeButton("Add original item to PO request", "add original item to po")
+        ]
+      );
+    }
+  }
+
+  const results = searchKnowledge(query, {
+    category: "01_PARTS_INVENTORY",
+    limit: 6
   });
 
-  const text = await response.text();
+  const strong = results.filter((result) => result.score >= 8);
 
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { ok: response.ok, raw: text };
+  if (strong.length) {
+    return [
+      "Here is the closest parts/supplies information I found:",
+      "",
+      ...strong.slice(0, 3).map((result) => summarizeRecord(result.record)),
+      "",
+      "Please physically verify before relying on it."
+    ].join("\n\n");
   }
-}
 
-function startMissingPartRequestFromPending(from, pending, requesterName) {
-  pendingRequests.set(from, {
-    step: "awaiting_due_date",
-    requesterName: pending.requesterName || requesterName || "",
-    requesterPhone: from,
-    partNumber: pending.partNumber || pending.originalQuery || "",
-    partDescription: pending.partDescription || "",
-    quantityRequested: "",
-    notes: pending.originalQuery || pending.partNumber || ""
+  pendingRequests.set(userKey, {
+    step: "confirm_add_part_to_po",
+    item: query,
+    originalQuery: query
   });
 
-  return (
-    "Okay. I can add this to Jonathan's next Purchase Order Request list.\n\n" +
-    "Item: " + (pending.partNumber || pending.originalQuery || "Not provided") + "\n" +
-    "Description: " + (pending.partDescription || "Not provided") + "\n\n" +
-    "What requested due date should I use?" +
-    dueDateButtons() +
-    "\n\nYou can also type your own date, like 6/20 or next Friday.\n\n" +
-    "Type cancel if you do not want to create this request."
+  return withButtons(
+    [
+      "I could not find that in the current parts/supplies inventory.",
+      "",
+      "Would you like me to add the original request to Jonathan’s Purchase Order Request list?"
+    ].join("\n"),
+    [
+      makeButton("Add to PO request", "add to po"),
+      makeButton("Cancel", "cancel")
+    ]
   );
 }
 
-async function handlePendingRequest({ pending, from, cleanBody, requesterName }) {
-  const msg = lower(cleanBody);
+function makeInkClarificationPrompt(originalInk, alternateInk, batchPounds, reason = "leading-zero") {
+  const originalLabel = exactInkLabel(originalInk);
+  const alternateLabel = exactInkLabel(alternateInk);
+
+  const pending = {
+    step: "clarify_ink_number",
+    originalInk: originalLabel,
+    alternateInk: alternateLabel,
+    batchPounds,
+    reason
+  };
+
+  const text =
+    reason === "both-exist"
+      ? [
+          `I found records for both ink ${originalLabel} and ink ${alternateLabel}.`,
+          "",
+          "Which one do you mean?"
+        ].join("\n")
+      : [
+          `I did not find a formula for ink ${originalLabel}, but I found a possible match for ink ${alternateLabel}.`,
+          "",
+          `Ink ${originalLabel} and ink ${alternateLabel} may not be the same color.`,
+          "",
+          "Which one do you mean?"
+        ].join("\n");
+
+  return { pending, text };
+}
+
+function answerInkQuestion(query, userKey, forcedInkNumber = "", forcedBatchPounds = null) {
+  if (isVagueInkRequest(query)) {
+    return answerVagueInkRequest();
+  }
+
+  const q = normalizeLoose(query);
+  if (!hasInkLanguage(query) && !forcedInkNumber) return "";
+
+  const inkNumber = forcedInkNumber || extractInkNumber(query);
+
+  if (!inkNumber) {
+    if (/\b(make ink formula|make formula|mix ink|check ink inventory|ink inventory)\b/.test(q)) {
+      return "What ink number or Pantone color do you need?";
+    }
+    return "";
+  }
+
+  const batchPounds = forcedBatchPounds || extractBatchPounds(query);
+
+  const wantsFormula =
+    forcedBatchPounds ||
+    /\b(make|mix|formula|batch|pounds|lbs|lb)\b/.test(q);
+
+  const exactFormula = findExactInkFormulaRecords(inkNumber);
+  const exactInventory = findExactInkInventoryRecords(inkNumber);
+
+  let alternateInk = "";
+  let alternateFormula = [];
+  let alternateInventory = [];
+
+  if (inkNumberHasLeadingZero(inkNumber)) {
+    alternateInk = stripLeadingZerosInk(inkNumber);
+    alternateFormula = findExactInkFormulaRecords(alternateInk);
+    alternateInventory = findExactInkInventoryRecords(alternateInk);
+
+    if ((exactFormula.length || exactInventory.length) && (alternateFormula.length || alternateInventory.length)) {
+      const clarification = makeInkClarificationPrompt(inkNumber, alternateInk, batchPounds, "both-exist");
+      pendingRequests.set(userKey, clarification.pending);
+      return withButtons(clarification.text, [
+        makeButton(`Use ink ${exactInkLabel(inkNumber)}`, `use ink ${exactInkLabel(inkNumber)}`),
+        makeButton(`Use ink ${exactInkLabel(alternateInk)}`, `use ink ${exactInkLabel(alternateInk)}`)
+      ]);
+    }
+
+    if (!exactFormula.length && !exactInventory.length && (alternateFormula.length || alternateInventory.length)) {
+      const clarification = makeInkClarificationPrompt(inkNumber, alternateInk, batchPounds, "leading-zero");
+      pendingRequests.set(userKey, clarification.pending);
+      return withButtons(clarification.text, [
+        makeButton(`Yes, use ink ${exactInkLabel(alternateInk)}`, `use ink ${exactInkLabel(alternateInk)}`),
+        makeButton(`No, I meant ink ${exactInkLabel(inkNumber)}`, `use ink ${exactInkLabel(inkNumber)}`)
+      ]);
+    }
+  }
+
+  if (wantsFormula) {
+    if (exactFormula.length) {
+      if (!batchPounds) {
+        pendingRequests.set(userKey, {
+          step: "awaiting_formula_batch_size",
+          inkNumber,
+          formulaRecord: exactFormula[0]
+        });
+
+        return withButtons(
+          `I found a formula for ink ${exactInkLabel(inkNumber)}. How many pounds do you want to make?`,
+          [
+            makeButton("5 lb", "5 lb"),
+            makeButton("10 lb", "10 lb"),
+            makeButton("25 lb", "25 lb"),
+            makeButton("50 lb", "50 lb")
+          ]
+        );
+      }
+
+      return formatFormula(exactFormula[0], inkNumber, batchPounds);
+    }
+
+    const nearby = findNearbyInkRecords(inkNumber);
+    if (nearby.length) {
+      pendingRequests.set(userKey, {
+        step: "clarify_nearby_ink",
+        originalInk: exactInkLabel(inkNumber),
+        nearbyInk: nearby[0].label,
+        batchPounds,
+        record: nearby[0].record
+      });
+
+      return withButtons(
+        [
+          `I could not find a formula record for ink ${exactInkLabel(inkNumber)} in the current JARVIS ink files.`,
+          "",
+          `I did find a nearby ink/color record: ${nearby[0].label}.`,
+          "",
+          `Ink ${exactInkLabel(inkNumber)} and ink ${nearby[0].label} may not be the same color.`,
+          "",
+          `Do you mean ink ${nearby[0].label}?`
+        ].join("\n"),
+        [
+          makeButton(`Yes, use ${nearby[0].label}`, `use ink ${nearby[0].label}`),
+          makeButton(`No, I meant ${exactInkLabel(inkNumber)}`, `use ink ${exactInkLabel(inkNumber)}`),
+          makeButton("Flag this for Jonathan", "flag for jonathan")
+        ]
+      );
+    }
+
+    if (exactInventory.length) {
+      return [
+        `I could not find a formula record for ink ${exactInkLabel(inkNumber)} in the current JARVIS ink files.`,
+        "",
+        "I did find inventory information:",
+        "",
+        formatInkInventory(exactInventory, inkNumber),
+        "",
+        "Do not guess a formula. JARVIS can flag this for Jonathan if you need help."
+      ].join("\n");
+    }
+
+    pendingRequests.set(userKey, {
+      step: "confirm_escalate",
+      issue: `Need formula/help for ink ${exactInkLabel(inkNumber)}. JARVIS could not find a formula or confirmed inventory.`,
+      priority: "URGENT"
+    });
+
+    return withButtons(
+      [
+        `I could not find a formula record for ink ${exactInkLabel(inkNumber)} in the current JARVIS ink files.`,
+        "",
+        "I also could not confirm current inventory for that ink color.",
+        "",
+        "Would you like me to flag this for Jonathan?"
+      ].join("\n"),
+      [
+        makeButton("Flag this for Jonathan", "flag for jonathan"),
+        makeButton("Cancel", "cancel")
+      ]
+    );
+  }
+
+  if (exactInventory.length) {
+    return formatInkInventory(exactInventory, inkNumber);
+  }
+
+  const nearby = findNearbyInkRecords(inkNumber);
+  if (nearby.length) {
+    pendingRequests.set(userKey, {
+      step: "clarify_nearby_ink",
+      originalInk: exactInkLabel(inkNumber),
+      nearbyInk: nearby[0].label,
+      batchPounds,
+      record: nearby[0].record
+    });
+
+    return withButtons(
+      [
+        `I could not find ink ${exactInkLabel(inkNumber)} in the current inventory.`,
+        "",
+        `I did find a nearby color, ink ${nearby[0].label}, but that is not the same as ${exactInkLabel(inkNumber)}.`,
+        "",
+        `Do you mean ink ${nearby[0].label}?`
+      ].join("\n"),
+      [
+        makeButton(`Yes, use ${nearby[0].label}`, `use ink ${nearby[0].label}`),
+        makeButton(`No, I meant ${exactInkLabel(inkNumber)}`, `use ink ${exactInkLabel(inkNumber)}`),
+        makeButton("Flag this for Jonathan", "flag for jonathan")
+      ]
+    );
+  }
+
+  pendingRequests.set(userKey, {
+    step: "confirm_escalate",
+    issue: `User asked about ink ${exactInkLabel(inkNumber)}, but JARVIS could not find formula or inventory.`,
+    priority: "NORMAL"
+  });
+
+  return withButtons(
+    [
+      `I could not find ink ${exactInkLabel(inkNumber)} in the current JARVIS ink files.`,
+      "",
+      "Would you like me to flag this for Jonathan?"
+    ].join("\n"),
+    [
+      makeButton("Flag this for Jonathan", "flag for jonathan"),
+      makeButton("Cancel", "cancel")
+    ]
+  );
+}
+
+async function handlePendingRequest(userKey, message) {
+  const pending = pendingRequests.get(userKey);
+  if (!pending) return "";
+
+  const command = normalizeLoose(parseButtonMessage(message));
+
+  if (command === "cancel") {
+    pendingRequests.delete(userKey);
+    return "Canceled.";
+  }
+
+  if (pending.step === "confirm_add_supply_to_po" || pending.step === "confirm_add_part_to_po") {
+    if (command.includes("add to po") || wantsToAddToPO(command) || isAffirmative(command)) {
+      pendingRequests.delete(userKey);
+      const result = await createPORequest(pending.item, {
+        priority: "NORMAL",
+        issue: pending.originalQuery,
+        notes: "User asked JARVIS to add this missing item to the PO request list."
+      });
+
+      if (result.ok) {
+        return [
+          `I added this to Jonathan’s Purchase Order Request list:`,
+          "",
+          pending.item,
+          "",
+          "This does not mean it has been ordered or approved yet. Jonathan will review it."
+        ].join("\n");
+      }
+
+      return [
+        "I tried to add this to the PO request list, but I could not confirm the spreadsheet update.",
+        "",
+        `Item: ${pending.item}`,
+        "",
+        "Please try again later or ask for Jonathan’s number if this is urgent."
+      ].join("\n");
+    }
+
+    if (isNegative(command)) {
+      pendingRequests.delete(userKey);
+      return "Okay, I did not add it.";
+    }
+
+    return withButtons(
+      "Do you want me to add this to Jonathan’s Purchase Order Request list?",
+      [
+        makeButton("Add to PO request", "add to po"),
+        makeButton("Cancel", "cancel")
+      ]
+    );
+  }
+
+  if (pending.step === "confirm_fuzzy_part") {
+    if (command.includes("yes fuzzy part") || isAffirmative(command)) {
+      pendingRequests.delete(userKey);
+      return [
+        "Okay. Here is the possible matching item:",
+        "",
+        summarizeRecord(pending.suggestedRecord),
+        "",
+        "Please physically verify before relying on it."
+      ].join("\n");
+    }
+
+    if (command.includes("add original item") || wantsToAddToPO(command)) {
+      pendingRequests.delete(userKey);
+      const result = await createPORequest(pending.originalQuery, {
+        priority: "NORMAL",
+        issue: `User did not confirm fuzzy match. Original request: ${pending.originalQuery}`,
+        notes: `JARVIS suggested ${pending.found}, but user chose to request original item.`
+      });
+
+      if (result.ok) {
+        return [
+          "I added the original item/request to Jonathan’s Purchase Order Request list.",
+          "",
+          pending.originalQuery,
+          "",
+          "This does not mean it has been ordered or approved yet. Jonathan will review it."
+        ].join("\n");
+      }
+
+      return "I tried to add the original request to the PO list, but I could not confirm the spreadsheet update.";
+    }
+
+    if (command.includes("no fuzzy part") || isNegative(command)) {
+      return withButtons(
+        "Okay. Do you want me to add the original item/request to Jonathan’s Purchase Order Request list?",
+        [
+          makeButton("Add original item to PO request", "add original item to po"),
+          makeButton("Cancel", "cancel")
+        ]
+      );
+    }
+
+    return withButtons(
+      "Is the possible close match the item you meant?",
+      [
+        makeButton("Yes, this is it", "yes fuzzy part"),
+        makeButton("No, not this item", "no fuzzy part"),
+        makeButton("Add original item to PO request", "add original item to po")
+      ]
+    );
+  }
 
   if (pending.step === "awaiting_formula_batch_size") {
-    if (isCancelIntent(msg)) {
-      pendingRequests.delete(from);
-      return "Okay — I canceled that ink formula request. What can I help you with?";
-    }
-
-    const batch = extractBatchSizePounds(cleanBody);
-
-    if (batch && batch > 0) {
-      pendingRequests.delete(from);
-      return answerCalculatedInkFormula(pending.inkNumber, batch);
-    }
-
-    if (looksLikeNewQuestion(cleanBody) && !lower(cleanBody).match(/\b\d+(?:\.\d+)?\s*(?:lb|lbs|pound|pounds)\b/)) {
-      pendingRequests.delete(from);
-      return "I cleared the pending ink formula amount and answered your new question instead.\n\n" + await getJarvisReply({ from, body: cleanBody, requesterName });
-    }
-
-    return "How many pounds do you want to make?" + formulaBatchButtons() + "\n\nYou can also type another amount, like 12 lb.";
-  }
-
-  if (pending.step === "possible_part_match") {
-    if (isAddToPoIntent(msg)) return startMissingPartRequestFromPending(from, pending, requesterName);
-
-    if (isWrongPartIntent(msg)) {
-      pendingRequests.set(from, {
-        ...pending,
-        step: "confirm_add_missing_part"
-      });
-
-      return (
-        "Got it. I will treat the original item as not found:\n\n" +
-        (pending.partNumber || pending.originalQuery || "Original item not provided") +
-        "\n\nWould you like me to add it to Jonathan's Purchase Order Request list?" +
-        addMissingPartButtons()
+    const pounds = extractBatchPounds(command);
+    if (!pounds) {
+      return withButtons(
+        "How many pounds do you want to make?",
+        [
+          makeButton("5 lb", "5 lb"),
+          makeButton("10 lb", "10 lb"),
+          makeButton("25 lb", "25 lb"),
+          makeButton("50 lb", "50 lb")
+        ]
       );
     }
 
-    if (isYesIntent(msg)) {
-      pendingRequests.delete(from);
-      return "Okay — please physically verify that possible match before relying on it for production. What can I help you with next?";
-    }
-
-    if (isCancelIntent(msg)) {
-      pendingRequests.delete(from);
-      return "Okay — I cleared that possible match. What can I help you with?";
-    }
-
-    if (looksLikeNewQuestion(cleanBody)) {
-      pendingRequests.delete(from);
-      return "I cleared the previous possible match and answered your new question instead.\n\n" + await getJarvisReply({ from, body: cleanBody, requesterName });
-    }
-
-    return "I need to know whether that possible match is correct first." + partMatchButtons();
+    pendingRequests.delete(userKey);
+    return formatFormula(pending.formulaRecord, pending.inkNumber, pounds);
   }
 
-  if (pending.step === "confirm_add_missing_part") {
-    if (isYesIntent(msg) || isAddToPoIntent(msg)) return startMissingPartRequestFromPending(from, pending, requesterName);
-
-    if (isCancelIntent(msg)) {
-      pendingRequests.delete(from);
-      return "Okay — I will not add that request. What can I help you with?";
+  if (pending.step === "clarify_ink_number") {
+    const useMatch = command.match(/\buse ink\s+([0-9]{1,4}(?:\s*[uc])?)\b/i);
+    if (!useMatch) {
+      return withButtons(
+        `Which ink do you mean?`,
+        [
+          makeButton(`Use ink ${pending.originalInk}`, `use ink ${pending.originalInk}`),
+          makeButton(`Use ink ${pending.alternateInk}`, `use ink ${pending.alternateInk}`)
+        ]
+      );
     }
 
-    if (looksLikeNewQuestion(cleanBody)) {
-      pendingRequests.delete(from);
-      return "I cleared the pending add-item offer and answered your new question instead.\n\n" + await getJarvisReply({ from, body: cleanBody, requesterName });
-    }
+    const selectedInk = useMatch[1].toUpperCase().replace(/\s*([UC])$/, " $1");
+    pendingRequests.delete(userKey);
 
-    return "Please choose whether to add the missing item to Jonathan's Purchase Order Request list." + addMissingPartButtons();
-  }
-
-  if (isCancelIntent(msg)) {
-    pendingRequests.delete(from);
-    return "Okay — I canceled the pending request. What can I help you with?";
-  }
-
-  if (requesterName) pending.requesterName = requesterName;
-
-  if (pending.step === "awaiting_due_date") {
-    if (looksLikeDueDateOrUrgency(cleanBody)) {
-      pending.requestedDueDate = cleanBody;
-      pending.step = "awaiting_machine";
-      pendingRequests.set(from, pending);
-
-      return "Got it. What machine or area is this item for?" + machineAreaButtons() + "\n\nYou can also type another machine or area.";
-    }
-
-    if (looksLikeNewQuestion(cleanBody)) {
-      pendingRequests.delete(from);
-      return "I paused the pending request and answered your new question instead.\n\n" + await getJarvisReply({ from, body: cleanBody, requesterName });
-    }
-
-    return (
-      "I am waiting for the requested due date for the pending request." +
-      dueDateButtons() +
-      "\n\nYou can also type something like 6/20, next Friday, ASAP, today, tomorrow, or within 2 weeks.\n\n" +
-      "Or type cancel to stop this request."
+    return answerInkQuestion(
+      `make ink ${selectedInk}${pending.batchPounds ? " " + pending.batchPounds + " lb" : ""}`,
+      userKey,
+      selectedInk,
+      pending.batchPounds
     );
   }
 
-  if (pending.step === "awaiting_machine") {
-    if (looksLikeNewQuestion(cleanBody)) {
-      pendingRequests.delete(from);
-      return "I paused the pending request and answered your new question instead.\n\n" + await getJarvisReply({ from, body: cleanBody, requesterName });
+  if (pending.step === "clarify_nearby_ink") {
+    if (command.includes("flag for jonathan")) {
+      pendingRequests.delete(userKey);
+      const result = await createEscalation(
+        `User needs help with ink ${pending.originalInk}. Nearby record found: ${pending.nearbyInk}, but user requested escalation.`,
+        { priority: "URGENT", item: `Ink ${pending.originalInk}` }
+      );
+      return escalationConfirmationText(`Ink ${pending.originalInk}`, result);
     }
 
-    if (!looksLikeMachineOrArea(cleanBody)) {
-      return (
-        "I am waiting for the machine or area for the pending request." +
-        machineAreaButtons() +
-        "\n\nYou can also type another machine or area.\n\n" +
-        "Or type cancel to stop this request."
+    const useMatch = command.match(/\buse ink\s+([0-9]{1,4}(?:\s*[uc])?)\b/i);
+    if (useMatch) {
+      const selectedInk = useMatch[1].toUpperCase().replace(/\s*([UC])$/, " $1");
+      const selectedIsNearby = canonicalInkLabel(selectedInk) === canonicalInkLabel(pending.nearbyInk);
+
+      pendingRequests.delete(userKey);
+
+      if (!selectedIsNearby) {
+        const result = await createEscalation(
+          `User confirmed they meant ink ${pending.originalInk}, but JARVIS only found nearby ink ${pending.nearbyInk}.`,
+          { priority: "URGENT", item: `Ink ${pending.originalInk}` }
+        );
+        return [
+          `Okay. I will not use ink ${pending.nearbyInk}.`,
+          "",
+          escalationConfirmationText(`Ink ${pending.originalInk}`, result)
+        ].join("\n");
+      }
+
+      return answerInkQuestion(
+        `make ink ${selectedInk}${pending.batchPounds ? " " + pending.batchPounds + " lb" : ""}`,
+        userKey,
+        selectedInk,
+        pending.batchPounds
       );
     }
 
-    pending.machineOrArea = cleanBody;
-
-    const priority = isHighPriorityDueDate(pending.requestedDueDate) ? "High" : "Normal";
-    let jonathanNotified = "No";
-
-    if (priority === "High") {
-      const alertSent = await sendTeamsAlert(
-        "🚨 *JARVIS HIGH PRIORITY REQUEST*\n\n" +
-        "Requester: " + (pending.requesterName || "Not provided") + "\n" +
-        "Requester ID: " + from + "\n" +
-        "Machine / Area: " + pending.machineOrArea + "\n" +
-        "Item: " + (pending.partNumber || "Not provided") + "\n" +
-        "Description: " + (pending.partDescription || "Not provided") + "\n" +
-        "Requested Due Date: " + pending.requestedDueDate + "\n\n" +
-        "Status: Added to JARVIS Parts Requests.\n\n" +
-        "Important: This is not ordered yet. Jonathan still needs to review it."
+    if (isNegative(command)) {
+      pendingRequests.delete(userKey);
+      const result = await createEscalation(
+        `User said nearby ink ${pending.nearbyInk} is not correct. Original request: ink ${pending.originalInk}.`,
+        { priority: "URGENT", item: `Ink ${pending.originalInk}` }
       );
-
-      jonathanNotified = alertSent ? "Yes" : "Alert Failed";
+      return escalationConfirmationText(`Ink ${pending.originalInk}`, result);
     }
 
-    const sheetRequest = {
-      requesterName: pending.requesterName || requesterName || "",
-      requesterPhone: from,
-      machineOrArea: pending.machineOrArea,
-      partNumber: pending.partNumber,
-      partDescription: pending.partDescription,
-      quantityRequested: pending.quantityRequested || "",
-      requestedDueDate: pending.requestedDueDate,
-      priority,
-      notes: pending.notes || "",
-      status: "New",
-      jonathanNotified
-    };
-
-    let sheetResult;
-
-    try {
-      sheetResult = await writePartsRequestToSheet(sheetRequest);
-    } catch (error) {
-      console.error("Failed to write parts request to sheet:", error);
-      sheetResult = { ok: false, error: error.toString() };
-    }
-
-    pendingRequests.delete(from);
-
-    if (!sheetResult.ok) {
-      return (
-        "I captured the request, but I could not write it to the shared spreadsheet.\n\n" +
-        "Item: " + sheetRequest.partNumber + "\n" +
-        "Description: " + sheetRequest.partDescription + "\n" +
-        "Requested Due Date: " + sheetRequest.requestedDueDate + "\n" +
-        "Machine / Area: " + sheetRequest.machineOrArea + "\n\n" +
-        "Jonathan needs to check the JARVIS logs.\n\n" +
-        "Important: This is not ordered yet."
-      );
-    }
-
-    let reply =
-      "Added to Jonathan's Purchase Order Request list.\n\n" +
-      "Item: " + (sheetRequest.partNumber || "Not provided") + "\n" +
-      "Description: " + (sheetRequest.partDescription || "Not provided") + "\n" +
-      "Requested Due Date: " + sheetRequest.requestedDueDate + "\n" +
-      "Machine / Area: " + sheetRequest.machineOrArea + "\n" +
-      "Priority: " + priority + "\n\n" +
-      "Important: This is not ordered yet. Jonathan still needs to review it.";
-
-    if (priority === "High") {
-      reply += "\n\nThis was marked HIGH priority because the requested due date appears to be within 2 weeks or urgent. Jonathan has been notified.";
-    }
-
-    return reply;
+    return withButtons(
+      `Do you mean ink ${pending.nearbyInk}?`,
+      [
+        makeButton(`Yes, use ${pending.nearbyInk}`, `use ink ${pending.nearbyInk}`),
+        makeButton(`No, I meant ${pending.originalInk}`, `use ink ${pending.originalInk}`),
+        makeButton("Flag this for Jonathan", "flag for jonathan")
+      ]
+    );
   }
 
-  return null;
+  if (pending.step === "confirm_escalate") {
+    if (command.includes("flag for jonathan") || isAffirmative(command) || isJonathanEscalationIntent(command)) {
+      pendingRequests.delete(userKey);
+      const result = await createEscalation(pending.issue, {
+        priority: pending.priority || "NORMAL"
+      });
+      return escalationConfirmationText(pending.issue, result);
+    }
+
+    if (isNegative(command)) {
+      pendingRequests.delete(userKey);
+      return "Okay. I did not flag it for Jonathan.";
+    }
+
+    return withButtons(
+      "Do you want me to flag this for Jonathan?",
+      [
+        makeButton("Flag this for Jonathan", "flag for jonathan"),
+        makeButton("Cancel", "cancel")
+      ]
+    );
+  }
+
+  return "";
 }
-
-async function startPartRequest({ from, cleanBody, requesterName }) {
-  const info = extractSimplePartInfo(cleanBody);
-  const partNumber = info.partNumber || extractCandidatePartNumber(cleanBody) || cleanBody;
-
-  const lookupResults = searchKnowledge(partNumber || cleanBody, {
-    maxResults: 3,
-    categories: ["01_PARTS_INVENTORY"],
-    minScore: looksLikePartNumber(partNumber) ? 55 : 35
-  });
-
-  if (lookupResults.length) {
-    const confidence = getPartMatchConfidence(partNumber || cleanBody, lookupResults[0]);
-
-    if (confidence !== "exact") {
-      pendingRequests.set(from, {
-        step: "possible_part_match",
-        requesterName,
-        requesterPhone: from,
-        partNumber: partNumber || info.partNumber,
-        partDescription: info.partDescription || "",
-        originalQuery: cleanBody,
-        possibleMatchSummary: answerPartsRow(lookupResults[0])
-      });
-
-      return answerPartSearchResults(partNumber || cleanBody, lookupResults, { includeButtons: true });
-    }
-
-    pendingRequests.set(from, {
-      step: "confirm_add_missing_part",
-      requesterName,
-      requesterPhone: from,
-      partNumber: partNumber || info.partNumber,
-      partDescription: info.partDescription || "",
-      originalQuery: cleanBody
-    });
-
-    return (
-      "I found an exact match in inventory:\n\n" +
-      answerPartsRow(lookupResults[0]) +
-      "\n\nIf you still need this added to Jonathan's PO request list, choose Add to PO request." +
-      addMissingPartButtons()
-    );
+async function processUserMessage(message, userKey = "web-user") {
+  const originalMessage = normalize(message);
+  if (!originalMessage) {
+    return "What can I help you with?";
   }
 
-  pendingRequests.set(from, {
-    step: "confirm_add_missing_part",
-    requesterName,
-    requesterPhone: from,
-    partNumber: partNumber || info.partNumber,
-    partDescription: info.partDescription || "",
-    originalQuery: cleanBody
+  const parsedMessage = parseButtonMessage(originalMessage);
+
+  const pendingResponse = await handlePendingRequest(userKey, parsedMessage);
+  if (pendingResponse) return pendingResponse;
+
+  const emergency = answerActiveEmergency(parsedMessage);
+  if (emergency) return emergency;
+
+  const jonathanStatus = answerJonathanStatus(parsedMessage);
+  if (jonathanStatus) return jonathanStatus;
+
+  if (isJonathanEscalationIntent(parsedMessage)) {
+    const result = await createEscalation(`User asked JARVIS to flag/contact Jonathan. Message: ${originalMessage}`, {
+      priority: "NORMAL",
+      notes: "User specifically asked JARVIS to contact or flag Jonathan. Do not escalate beyond Jonathan."
+    });
+    return escalationConfirmationText(originalMessage, result);
+  }
+
+  const mapAnswer = answerMapQuestion(parsedMessage);
+  if (mapAnswer) return mapAnswer;
+
+  const wasteInkAnswer = answerWasteInkPickup(parsedMessage);
+  if (wasteInkAnswer) return wasteInkAnswer;
+
+  const vendorAnswer = answerVendorContact(parsedMessage);
+  if (vendorAnswer) return vendorAnswer;
+
+  const copperAnswer = answerCopperWastewater(parsedMessage);
+  if (copperAnswer) return copperAnswer;
+
+  const hvacAnswer = answerHvacQuestion(parsedMessage);
+  if (hvacAnswer) return hvacAnswer;
+
+  const aniloxAnswer = answerAniloxQuestion(parsedMessage);
+  if (aniloxAnswer) return aniloxAnswer;
+
+  const inkAnswer = answerInkQuestion(parsedMessage, userKey);
+  if (inkAnswer) return inkAnswer;
+
+  const knifeAnswer = answerKnifeQuestion(parsedMessage);
+  if (knifeAnswer) return knifeAnswer;
+
+  const magnaAnswer = answerMagnaQuestion(parsedMessage);
+  if (magnaAnswer) return magnaAnswer;
+
+  const scheduleAnswer = answerScheduleQuestion(parsedMessage);
+  if (scheduleAnswer) return scheduleAnswer;
+
+  const partsAnswer = answerPartsOrSupplyQuestion(parsedMessage, userKey);
+  if (partsAnswer) return partsAnswer;
+
+  const results = searchKnowledge(parsedMessage, { limit: 5 });
+  const strongResults = results.filter((result) => result.score >= 8);
+
+  if (strongResults.length) {
+    return [
+      "Here is what I found:",
+      "",
+      ...strongResults.slice(0, 3).map((result) => summarizeRecord(result.record)),
+      "",
+      "Please physically verify before relying on it."
+    ].join("\n\n");
+  }
+
+  pendingRequests.set(userKey, {
+    step: "confirm_escalate",
+    issue: `JARVIS could not answer this question confidently: ${originalMessage}`,
+    priority: shouldEscalateUrgent(originalMessage) ? "URGENT" : "NORMAL"
   });
 
-  return (
-    "I could not find that item in the current JARVIS parts/supplies inventory.\n\n" +
-    "Would you like me to add it to Jonathan's Purchase Order Request list?" +
-    addMissingPartButtons()
+  return withButtons(
+    [
+      `I received your question:`,
+      "",
+      `"${originalMessage}"`,
+      "",
+      "I do not have enough information loaded to answer that confidently.",
+      "",
+      "Would you like me to flag this for Jonathan?"
+    ].join("\n"),
+    [
+      makeButton("Flag this for Jonathan", "flag for jonathan"),
+      makeButton("Cancel", "cancel")
+    ]
   );
 }
 
-async function getJarvisReply({ from = "browser-test", body = "", requesterName = "" }) {
-  const cleanBody = normalize(body);
-  const msg = lower(cleanBody);
-
-  if (knowledgeLoadError) {
-    return "JARVIS had a problem loading the knowledge base. Jonathan needs to check the Render logs.";
-  }
-
-  const pending = pendingRequests.get(from);
-  if (pending) {
-    const pendingReply = await handlePendingRequest({ pending, from, cleanBody, requesterName });
-    if (pendingReply) return pendingReply;
-  }
-
-  const intent = classifyIntent(msg);
-
-  switch (intent) {
-    case "help":
-      return (
-        "What can I help you with?\n\n" +
-        "You can ask about parts/supplies, ink, ink formulas, waste ink pickup, vendor phone numbers, Jonathan's vacation/contact info, HVAC service calls, thermostats/maps, knives, PO/POR requests, Magna rebuilds, Warehouse 4 mailshop equipment, safety training, or the 2-2-3 schedule.\n\n" +
-        "Knowledge base records loaded: " + knowledgeRecords.length + "."
-      );
-
-    case "jonathan_status":
-      return answerJonathanStatusQuestion(cleanBody);
-
-    case "vendor_contact":
-      return answerVendorContactQuestion(cleanBody);
-
-    case "po_policy":
-      return answerPoRequest();
-
-    case "part_ordering_process":
-      return answerPartOrderingProcess();
-
-    case "part_request_start":
-      return startPartRequest({ from, cleanBody, requesterName });
-
-    case "schedule":
-      return answerScheduleQuestion(cleanBody);
-
-    case "map":
-      return answerMapQuestion(cleanBody);
-
-    case "hvac":
-      return answerHvacQuestion(cleanBody);
-
-    case "waste_ink":
-      return answerWasteInkQuestion(cleanBody);
-
-    case "ink_formula":
-      return answerInkFormulaQuestion(cleanBody, { from, requesterName });
-
-    case "ink":
-      return answerInkQuestion(cleanBody);
-
-    case "parts_lookup":
-      return answerPartsLookup(cleanBody, { from, requesterName });
-
-    case "open_orders":
-      return answerFromTopResults(cleanBody, searchKnowledge(cleanBody, { maxResults: 6, categories: ["02_OPEN_ORDERS"], minScore: 35 }));
-
-    case "magna":
-      return answerFromTopResults(cleanBody, searchKnowledge(cleanBody, { maxResults: 6, categories: ["07_MAGNA_REBUILDS"], minScore: 35 }));
-
-    case "knives":
-      return answerFromTopResults(cleanBody, searchKnowledge(cleanBody, { maxResults: 6, categories: ["05_KNIVES"], minScore: 50 }));
-
-    case "mailshop":
-      return answerFromTopResults(cleanBody, searchKnowledge(cleanBody, { maxResults: 6, categories: ["08_MAILSHOP_EQUIPMENT_OUTGOING"], minScore: 35 }));
-
-    case "safety":
-      return answerFromTopResults(cleanBody, searchKnowledge(cleanBody, { maxResults: 6, categories: ["10_SAFETY_TRAINING"], minScore: 35 }));
-
-    default: {
-      const results = searchKnowledge(cleanBody, { maxResults: 5, minScore: 50 });
-
-      if (results.length) return answerFromTopResults(cleanBody, results);
-
-      return (
-        "I received your question:\n\n" +
-        "\"" + cleanBody + "\"\n\n" +
-        "I do not have enough information loaded to answer that confidently yet.\n\n" +
-        "I should not guess. Try asking with a part number, item name, ink color, machine/area, vendor, order clue, map location, or schedule keyword. If this still needs a human, call or text Jonathan."
-      );
-    }
-  }
+function escapeHtml(text) {
+  return normalize(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
-function getAskPageHtml() {
-  return `<!DOCTYPE html>
+function renderMessageHtml(text) {
+  const raw = normalize(text);
+  const lines = raw.split("\n");
+  const htmlParts = [];
+
+  for (const line of lines) {
+    const imageMatch = line.match(/^\[image:(.+?)\]$/);
+    if (imageMatch) {
+      const src = imageMatch[1];
+      htmlParts.push(
+        `<a href="${escapeHtml(src)}" target="_blank" rel="noopener"><img class="kb-image" src="${escapeHtml(src)}" alt="JARVIS map image"></a>`
+      );
+      continue;
+    }
+
+    const buttonMatch = line.match(/^\[button:([^|\]]+)\|([^\]]+)\]$/);
+    if (buttonMatch) {
+      const value = escapeHtml(`[button:${buttonMatch[1]}|${buttonMatch[2]}]`);
+      const label = escapeHtml(buttonMatch[2]);
+      htmlParts.push(`<button class="quick-button" data-value="${value}">${label}</button>`);
+      continue;
+    }
+
+    if (!line.trim()) {
+      htmlParts.push("<br>");
+      continue;
+    }
+
+    htmlParts.push(`<div>${escapeHtml(line)}</div>`);
+  }
+
+  return htmlParts.join("");
+}
+
+function renderAskPage() {
+  return `<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>J.A.R.V.I.S.</title>
   <style>
-    :root { --blue:#123a63; --blue2:#0f2f52; --dark:#1f2933; --border:#d6dee8; --green:#ecfdf3; --green-border:#a6d9b7; --button:#eef6ff; --button-border:#9cc4e8; }
-    * { box-sizing:border-box; }
-    html, body { height:100%; margin:0; font-family:Arial, Helvetica, sans-serif; background:#f6f9fc; color:var(--dark); }
-    body { overflow:hidden; }
-    .app { height:100dvh; max-width:860px; margin:0 auto; background:white; display:flex; flex-direction:column; border-left:1px solid var(--border); border-right:1px solid var(--border); }
-    .header { flex:0 0 auto; background:linear-gradient(135deg, var(--blue), var(--blue2)); color:white; padding:15px 16px 13px; box-shadow:0 2px 10px rgba(15,23,42,0.18); z-index:2; text-align:center; }
-    .header h1 { margin:0; font-size:30px; letter-spacing:3px; line-height:1; }
-    .header p { margin:6px 0 0; font-size:12px; opacity:.95; }
-    .version { margin-top:5px; font-size:11px; opacity:.75; }
-    .chat { flex:1 1 auto; overflow-y:auto; padding:16px 14px; background:radial-gradient(circle at top left, rgba(18,58,99,.06), transparent 35%), #f7f9fc; }
-    .bubble-wrap { display:flex; margin:10px 0; }
-    .user-wrap { justify-content:flex-end; }
-    .jarvis-wrap { justify-content:flex-start; }
-    .bubble { max-width:82%; white-space:pre-wrap; line-height:1.42; border-radius:18px; padding:12px 14px; font-size:16px; box-shadow:0 1px 4px rgba(15,23,42,.06); }
-    .user { background:var(--blue); color:white; border-bottom-right-radius:6px; }
-    .jarvis { background:white; border:1px solid var(--border); border-bottom-left-radius:6px; }
-    .system { background:var(--green); border:1px solid var(--green-border); border-bottom-left-radius:6px; }
-    .chat-image { display:block; max-width:100%; height:auto; margin:10px 0 4px; border:1px solid var(--border); border-radius:12px; background:white; cursor:zoom-in; }
-    .image-caption { display:block; font-size:12px; color:#64748b; margin-top:4px; }
-    .quick-button { display:block; width:100%; text-align:left; margin:7px 0 0; padding:12px 13px; font-size:15px; font-weight:bold; color:var(--blue2); background:var(--button); border:1px solid var(--button-border); border-radius:12px; cursor:pointer; }
-    .quick-button:hover { background:#dff0ff; }
-    .quick-button:disabled { opacity:.55; cursor:default; }
-    .composer { flex:0 0 auto; background:white; border-top:1px solid var(--border); padding:10px; box-shadow:0 -2px 10px rgba(15,23,42,.06); }
-    .name-row { display:flex; gap:8px; margin-bottom:8px; }
-    .name-row input { width:100%; border:1px solid var(--border); border-radius:12px; padding:10px 12px; font-size:15px; }
-    .input-row { display:flex; gap:8px; align-items:flex-end; }
-    textarea { flex:1 1 auto; min-height:48px; max-height:120px; resize:none; border:1px solid var(--border); border-radius:16px; padding:12px; font-size:16px; font-family:Arial, Helvetica, sans-serif; line-height:1.3; }
-    .send { flex:0 0 auto; background:var(--blue); color:white; border:none; border-radius:16px; padding:13px 17px; font-size:16px; font-weight:bold; cursor:pointer; min-height:48px; }
-    .send:disabled { background:#8aa0b7; cursor:wait; }
-    .examples { font-size:12px; color:#64748b; margin-top:7px; line-height:1.35; text-align:center; }
-    .fine-print { font-size:11px; color:#64748b; margin-top:6px; text-align:center; }
-    @media (max-width:560px) {
-      .app{border-left:none;border-right:none;}
-      .header h1{font-size:26px;}
-      .bubble{max-width:90%;font-size:15px;}
-      .header{padding:13px 12px 10px;}
-      .chat{padding:12px 10px;}
-      .composer{padding:9px;}
-      .send{padding-left:14px;padding-right:14px;}
+    :root {
+      color-scheme: light;
+      --bg: #f3f5f8;
+      --card: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --blue: #2563eb;
+      --blue-dark: #1d4ed8;
+      --border: #d1d5db;
+      --bot: #eef2ff;
+      --user: #dcfce7;
+      --danger: #b91c1c;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .page {
+      width: min(900px, 100%);
+      margin: 0 auto;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 18px;
+    }
+
+    header {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+      margin-bottom: 14px;
+    }
+
+    h1 {
+      margin: 0 0 4px 0;
+      font-size: clamp(28px, 6vw, 44px);
+      letter-spacing: 0.03em;
+    }
+
+    .subtitle {
+      font-size: clamp(14px, 3vw, 18px);
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .version {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .chat {
+      flex: 1;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 14px;
+      overflow-y: auto;
+      min-height: 420px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    }
+
+    .message {
+      max-width: 86%;
+      margin: 10px 0;
+      padding: 12px 14px;
+      border-radius: 16px;
+      line-height: 1.38;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .message.bot {
+      background: var(--bot);
+      border-bottom-left-radius: 4px;
+      margin-right: auto;
+    }
+
+    .message.user {
+      background: var(--user);
+      border-bottom-right-radius: 4px;
+      margin-left: auto;
+    }
+
+    .message.error {
+      background: #fee2e2;
+      color: var(--danger);
+    }
+
+    .composer {
+      display: flex;
+      gap: 10px;
+      padding: 14px 0 0 0;
+    }
+
+    textarea {
+      flex: 1;
+      min-height: 54px;
+      max-height: 150px;
+      resize: vertical;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      padding: 14px;
+      font: inherit;
+      background: #fff;
+      color: var(--text);
+    }
+
+    button {
+      font: inherit;
+    }
+
+    .send {
+      min-width: 86px;
+      border: 0;
+      border-radius: 16px;
+      padding: 0 18px;
+      color: white;
+      background: var(--blue);
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .send:hover {
+      background: var(--blue-dark);
+    }
+
+    .send:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    .quick-button {
+      display: block;
+      width: fit-content;
+      max-width: 100%;
+      margin: 8px 0;
+      border: 1px solid var(--blue);
+      border-radius: 999px;
+      padding: 9px 13px;
+      color: var(--blue);
+      background: #fff;
+      cursor: pointer;
+      font-weight: 700;
+      text-align: left;
+    }
+
+    .quick-button:hover {
+      background: #eff6ff;
+    }
+
+    .examples {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .kb-image {
+      max-width: 100%;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      margin: 8px 0;
+      background: #fff;
+    }
+
+    footer {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 10px 4px 0 4px;
+      text-align: center;
+    }
+
+    @media (max-width: 600px) {
+      .page {
+        padding: 10px;
+      }
+
+      .composer {
+        gap: 8px;
+      }
+
+      .send {
+        min-width: 72px;
+        padding: 0 12px;
+      }
+
+      .message {
+        max-width: 94%;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="app">
-    <header class="header">
+  <main class="page">
+    <header>
       <h1>J.A.R.V.I.S.</h1>
-      <p>Jonathan's Automated Resource &amp; Virtual Information System</p>
+      <div class="subtitle">Jonathan's Automated Resource &amp; Virtual Information System</div>
       <div class="version">v${APP_VERSION}</div>
+      <div class="examples">Try: “Do we have ink 186?”, “Make 10 lb of ink 2935 U”, “I need AA batteries”, “Where are the thermostats?”, “Who do I call for waste ink pickup?”</div>
     </header>
 
-    <main id="chat" class="chat"></main>
+    <section id="chat" class="chat" aria-live="polite">
+      <div class="message bot">What can I help you with?</div>
+    </section>
 
-    <footer class="composer">
-      <div class="name-row">
-        <input id="name" placeholder="Your name, example: Joe" autocomplete="name" />
-      </div>
+    <form id="form" class="composer">
+      <textarea id="input" placeholder="Type your question..." autofocus></textarea>
+      <button id="send" class="send" type="submit">Send</button>
+    </form>
 
-      <div class="input-row">
-        <textarea id="question" placeholder="Ask JARVIS like you would ask Jonathan..."></textarea>
-        <button id="askButton" class="send" type="button" onclick="askJarvis()">Ask</button>
-      </div>
-
-      <div class="examples">Examples: “make 10 lb of ink 186” • “i need AA batteries” • “what is Crystal Clean's number?”</div>
-      <div class="fine-print">Parts requests are not ordered until Jonathan reviews them. JARVIS answers from the current knowledge snapshot.</div>
+    <footer>
+      JARVIS gives best-effort help from loaded facility notes. Verify critical production information before relying on it.
     </footer>
-  </div>
+  </main>
 
   <script>
-    function getSessionId() {
-      let id = localStorage.getItem("jarvisSessionId");
+    const chat = document.getElementById("chat");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+    const send = document.getElementById("send");
 
-      if (!id) {
-        id = window.crypto && crypto.randomUUID ? crypto.randomUUID() : "session-" + Date.now() + "-" + Math.random().toString(16).slice(2);
-        localStorage.setItem("jarvisSessionId", id);
-      }
-
-      return id;
-    }
-
-    function scrollChatToBottom() {
-      const chat = document.getElementById("chat");
+    function scrollToBottom() {
       chat.scrollTop = chat.scrollHeight;
     }
 
-    function isSafeImagePath(src) {
-      return /^\\/kb\\/.+\\.(png|jpg|jpeg|webp)$/i.test(src);
+    function addMessage(role, html, isHtml = false) {
+      const div = document.createElement("div");
+      div.className = "message " + role;
+      if (isHtml) div.innerHTML = html;
+      else div.textContent = html;
+      chat.appendChild(div);
+      scrollToBottom();
+      return div;
     }
 
-    function disableButtonsNear(button) {
-      const bubble = button.closest(".bubble");
-      if (!bubble) return;
+    async function sendMessage(text) {
+      const message = (text || "").trim();
+      if (!message) return;
 
-      bubble.querySelectorAll(".quick-button").forEach(function(btn) {
-        btn.disabled = true;
-      });
-    }
+      addMessage("user", message);
+      input.value = "";
+      send.disabled = true;
 
-    function renderMessageContent(container, text) {
-      const lines = String(text).split("\\n");
-
-      lines.forEach(function(line, index) {
-        const trimmed = line.trim();
-        const imageMatch = trimmed.match(/^\\[image:(\\/kb\\/[^\\]]+\\.(?:png|jpg|jpeg|webp))\\]$/i);
-        const buttonMatch = trimmed.match(/^\\[button:([^|\\]]+)\\|([^\\]]+)\\]$/i);
-
-        if (imageMatch && isSafeImagePath(imageMatch[1])) {
-          const image = document.createElement("img");
-          image.className = "chat-image";
-          image.src = imageMatch[1];
-          image.alt = "JARVIS map image";
-          image.loading = "lazy";
-          image.onclick = function() { window.open(image.src, "_blank"); };
-          image.onerror = function() { image.replaceWith(document.createTextNode("Map image could not load: " + imageMatch[1])); };
-
-          container.appendChild(image);
-
-          const caption = document.createElement("span");
-          caption.className = "image-caption";
-          caption.textContent = "Tap/click the map to open it larger.";
-          container.appendChild(caption);
-        } else if (buttonMatch) {
-          const value = buttonMatch[1].trim();
-          const label = buttonMatch[2].trim();
-
-          const button = document.createElement("button");
-          button.className = "quick-button";
-          button.type = "button";
-          button.textContent = label;
-          button.onclick = function() {
-            disableButtonsNear(button);
-            sendJarvisQuestion(value, label);
-          };
-
-          container.appendChild(button);
-        } else {
-          container.appendChild(document.createTextNode(line));
-        }
-
-        if (index < lines.length - 1) container.appendChild(document.createElement("br"));
-      });
-    }
-
-    function addMessage(text, type) {
-      const chat = document.getElementById("chat");
-
-      const wrap = document.createElement("div");
-      wrap.className = "bubble-wrap " + (type === "user" ? "user-wrap" : "jarvis-wrap");
-
-      const bubble = document.createElement("div");
-      bubble.className = "bubble " + type;
-
-      renderMessageContent(bubble, String(text));
-
-      wrap.appendChild(bubble);
-      chat.appendChild(wrap);
-
-      scrollChatToBottom();
-    }
-
-    async function sendJarvisQuestion(question, displayText) {
-      const nameInput = document.getElementById("name");
-      const button = document.getElementById("askButton");
-
-      const name = nameInput.value.trim();
-      const textToSend = String(question || "").trim();
-      const textToShow = String(displayText || question || "").trim();
-
-      if (!textToSend) return;
-
-      localStorage.setItem("jarvisName", name);
-
-      button.disabled = true;
-      button.textContent = "...";
-
-      addMessage(textToShow, "user");
+      const thinking = addMessage("bot", "Thinking...");
 
       try {
         const response = await fetch("/api/ask", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: getSessionId(), name, question: textToSend })
+          body: JSON.stringify({ message })
         });
 
         const data = await response.json();
 
-        if (!response.ok) throw new Error(data.error || "Request failed");
-
-        addMessage(data.reply, "jarvis");
-      } catch (error) {
-        addMessage("I had a problem answering that. Jonathan needs to check the JARVIS logs. Error: " + error.message, "system");
-      } finally {
-        button.disabled = false;
-        button.textContent = "Ask";
-        document.getElementById("question").focus();
-        scrollChatToBottom();
-      }
-    }
-
-    async function askJarvis() {
-      const questionInput = document.getElementById("question");
-      const question = questionInput.value.trim();
-
-      if (!question) {
-        questionInput.focus();
-        return;
-      }
-
-      questionInput.value = "";
-      await sendJarvisQuestion(question, question);
-    }
-
-    document.addEventListener("DOMContentLoaded", function() {
-      const savedName = localStorage.getItem("jarvisName");
-      if (savedName) document.getElementById("name").value = savedName;
-
-      addMessage("What can I help you with?", "system");
-
-      document.getElementById("question").addEventListener("keydown", function(event) {
-        if (event.key === "Enter" && !event.shiftKey) {
-          event.preventDefault();
-          askJarvis();
+        if (!response.ok) {
+          throw new Error(data.error || "Request failed");
         }
-      });
 
-      document.getElementById("question").focus();
+        thinking.innerHTML = data.html || "";
+      } catch (error) {
+        thinking.className = "message bot error";
+        thinking.textContent = "JARVIS had trouble answering. Please try again.";
+      } finally {
+        send.disabled = false;
+        input.focus();
+        scrollToBottom();
+      }
+    }
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      sendMessage(input.value);
+    });
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage(input.value);
+      }
+    });
+
+    chat.addEventListener("click", (event) => {
+      const button = event.target.closest(".quick-button");
+      if (!button) return;
+      sendMessage(button.dataset.value);
     });
   </script>
 </body>
 </html>`;
 }
 
-app.use("/kb", express.static(DATA_ROOT));
-
-app.get("/", (_req, res) => res.redirect("/ask"));
-
-app.get("/ask", (_req, res) => {
-  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-  res.set("Pragma", "no-cache");
-  res.set("Expires", "0");
-  res.type("html").send(getAskPageHtml());
+app.use((req, res, next) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  next();
 });
 
-app.get("/health", (_req, res) => {
-  res.status(200).json({
-    ok: !knowledgeLoadError,
-    status: "J.A.R.V.I.S. online.",
+app.use("/kb", express.static(DATA_ROOT, {
+  setHeaders: (res) => {
+    res.setHeader("Cache-Control", "no-store");
+  }
+}));
+
+app.get("/", (req, res) => {
+  res.redirect("/ask");
+});
+
+app.get("/ask", (req, res) => {
+  res.type("html").send(renderAskPage());
+});
+
+app.post("/api/ask", async (req, res) => {
+  try {
+    const message = normalize(req.body?.message);
+    const userKey = getUserKey(req);
+    const answer = await processUserMessage(message, userKey);
+    res.json({
+      ok: true,
+      version: APP_VERSION,
+      answer,
+      html: renderMessageHtml(answer)
+    });
+  } catch (error) {
+    console.error("API ask error:", error);
+    res.status(500).json({
+      ok: false,
+      version: APP_VERSION,
+      error: "JARVIS had trouble answering."
+    });
+  }
+});
+
+app.post("/sms", async (req, res) => {
+  const message = normalize(req.body?.Body);
+  const userKey = getUserKey(req);
+
+  let answer = "";
+  try {
+    answer = await processUserMessage(message, userKey);
+  } catch (error) {
+    console.error("SMS error:", error);
+    answer = "JARVIS had trouble answering. Please try again.";
+  }
+
+  const response = new Twiml.MessagingResponse();
+  response.message(answer.replace(/\[button:[^\]]+\]/g, "").replace(/\[image:[^\]]+\]/g, ""));
+  res.type("text/xml").send(response.toString());
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
     version: APP_VERSION,
-    recordsLoaded: knowledgeRecords.length,
+    records: knowledgeRecords.length,
     loadedAt: knowledgeLoadedAt,
-    dataRoot: fs.existsSync(DATA_ROOT) ? "found" : "missing",
-    error: knowledgeLoadError ? knowledgeLoadError.toString() : null
+    loadError: knowledgeLoadError ? knowledgeLoadError.message : null,
+    requestWebhookConfigured: !!REQUEST_WEBHOOK_URL
   });
 });
 
-app.get("/kb-status", (_req, res) => {
-  const counts = {};
-
+app.get("/kb-status", (req, res) => {
+  const byCategory = {};
   for (const record of knowledgeRecords) {
-    counts[record.category] = (counts[record.category] || 0) + 1;
+    byCategory[record.category] = (byCategory[record.category] || 0) + 1;
   }
 
   res.json({
     ok: !knowledgeLoadError,
     version: APP_VERSION,
-    recordsLoaded: knowledgeRecords.length,
+    dataRoot: DATA_ROOT,
+    records: knowledgeRecords.length,
     loadedAt: knowledgeLoadedAt,
-    counts,
-    error: knowledgeLoadError ? knowledgeLoadError.toString() : null
+    loadError: knowledgeLoadError ? knowledgeLoadError.message : null,
+    byCategory,
+    sampleFiles: [...new Set(knowledgeRecords.map((record) => record.sourceFile))].slice(0, 100)
   });
 });
 
-app.get("/reload-kb", (_req, res) => {
+app.post("/reload-kb", (req, res) => {
   loadKnowledgeBase();
-  res.redirect("/kb-status");
-});
-
-app.post("/api/ask", async (req, res) => {
-  try {
-    const sessionId = normalize(req.body.sessionId) || "web-unknown";
-    const name = normalize(req.body.name);
-    const question = normalize(req.body.question);
-
-    if (!question) {
-      return res.status(400).json({ ok: false, error: "Missing question" });
-    }
-
-    const from = "web:" + sessionId;
-
-    console.log("Web question received:", { from, name, question });
-
-    const reply = await getJarvisReply({
-      from,
-      body: question,
-      requesterName: name
-    });
-
-    res.json({
-      ok: true,
-      reply,
-      version: APP_VERSION
-    });
-  } catch (error) {
-    console.error("Web ask error:", error);
-
-    res.status(500).json({
-      ok: false,
-      error: error.toString()
-    });
-  }
-});
-
-app.get("/test", async (req, res) => {
-  const reply = await getJarvisReply({
-    from: req.query.from || "browser-test",
-    body: req.query.body || "HELP",
-    requesterName: req.query.name || ""
+  res.json({
+    ok: !knowledgeLoadError,
+    version: APP_VERSION,
+    records: knowledgeRecords.length,
+    loadedAt: knowledgeLoadedAt,
+    loadError: knowledgeLoadError ? knowledgeLoadError.message : null
   });
-
-  res.type("text/plain").send(reply);
 });
 
-app.post("/sms", async (req, res) => {
-  try {
-    const from = req.body.From || "";
-    const body = req.body.Body || "";
-    const city = req.body.FromCity || "";
-    const state = req.body.FromState || "";
+app.get("/debug/search", (req, res) => {
+  const q = normalize(req.query.q);
+  const results = searchKnowledge(q, { limit: 15 }).map((result) => ({
+    score: result.score,
+    title: result.record.title,
+    category: result.record.category,
+    sourceFile: result.record.sourceFile,
+    sheetName: result.record.sheetName,
+    rowNumber: result.record.rowNumber,
+    summary: summarizeRecord(result.record)
+  }));
 
-    const reply = await getJarvisReply({
-      from,
-      body,
-      requesterName: ""
-    });
-
-    const teamsWebhook = process.env.TEAMS_WEBHOOK_URL;
-
-    if (teamsWebhook) {
-      try {
-        await fetch(teamsWebhook, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text:
-              "🤖 *J.A.R.V.I.S. SMS*\n" +
-              "**From:** " + from + " (" + city + ", " + state + ")\n" +
-              "**Message:** " + body + "\n\n" +
-              "**JARVIS Reply:** " + reply
-          })
-        });
-      } catch (teamsError) {
-        console.error("Teams webhook failed:", teamsError);
-      }
-    }
-
-    const twiml = new Twiml.MessagingResponse();
-    twiml.message(reply);
-
-    res.type("text/xml").send(twiml.toString());
-  } catch (e) {
-    console.error("JARVIS SMS handler error:", e);
-
-    const twiml = new Twiml.MessagingResponse();
-    twiml.message("J.A.R.V.I.S. had an internal error while processing that message. Jonathan needs to check the logs.");
-
-    res.type("text/xml").send(twiml.toString());
-  }
+  res.json({
+    version: APP_VERSION,
+    query: q,
+    results
+  });
 });
+
+app.get("/debug/ink", (req, res) => {
+  const ink = normalize(req.query.ink);
+  res.json({
+    version: APP_VERSION,
+    ink,
+    exactLabel: exactInkLabel(ink),
+    canonicalLabel: canonicalInkLabel(ink),
+    hasLeadingZero: inkNumberHasLeadingZero(ink),
+    stripped: stripLeadingZerosInk(ink),
+    exactFormula: findExactInkFormulaRecords(ink).map((record) => ({
+      sourceFile: record.sourceFile,
+      sheetName: record.sheetName,
+      rowNumber: record.rowNumber,
+      summary: summarizeRecord(record)
+    })),
+    exactInventory: findExactInkInventoryRecords(ink).map((record) => ({
+      sourceFile: record.sourceFile,
+      sheetName: record.sheetName,
+      rowNumber: record.rowNumber,
+      summary: summarizeRecord(record)
+    })),
+    nearby: findNearbyInkRecords(ink).map((item) => ({
+      label: item.label,
+      sourceFile: item.record.sourceFile,
+      sheetName: item.record.sheetName,
+      rowNumber: item.record.rowNumber,
+      summary: summarizeRecord(item.record)
+    }))
+  });
+});
+
+const PORT = process.env.PORT || 3000;
 
 loadKnowledgeBase();
 
-const port = process.env.PORT || 3001;
-
-app.listen(port, () => {
-  console.log("J.A.R.V.I.S. v" + APP_VERSION + " listening on " + port);
+app.listen(PORT, () => {
+  console.log(`JARVIS v${APP_VERSION} listening on port ${PORT}`);
 });
