@@ -1,286 +1,190 @@
 # Map Index
 
-
-
 This folder contains facility map references for JARVIS.
-
-
 
 JARVIS should use these maps when someone asks where something is located.
 
+JARVIS should show the correct map image when possible. Do not dump this index file as the answer unless the user specifically asks what maps are available.
 
+---
 
-## Main Facility Map PDF
+## Available Map Files
 
-
+### Thermostat Locations
 
 Use this file:
 
+`HVAC_thermostat_locations.png`
 
+This map shows thermostat locations throughout the facility.
 
-`MAP_facility_thermostats_eyewash_fire_extinguishers.pdf`
+JARVIS should show this map when someone asks:
 
+* where is the thermostat?
+* where are the thermostats?
+* thermostat map
+* HVAC controls
+* temperature controls
+* AC controls
+* heat controls
 
+Expected JARVIS answer:
 
-This PDF contains:
+Here is the thermostat location map:
 
+`[image:/kb/04_HVAC_AND_BUILDING/HVAC_thermostat_locations.png]`
 
+---
 
-* Page 1: Thermostat locations
+### Eye Wash Stations
 
-* Page 2: Eye wash stations
+Use this file:
 
-* Page 3: Fire extinguishers
+`FACILITY_eye_wash_stations.png`
 
+This map shows eye wash station locations throughout the facility.
 
+JARVIS should show this map when someone asks:
 
-## Map Categories
+* where is the eyewash?
+* where is the eye wash station?
+* eye wash map
+* eyewash station location
+* chemical splash station
+* emergency eye wash
 
+Expected JARVIS answer:
 
+Here is the eye wash station map:
+
+`[image:/kb/04_HVAC_AND_BUILDING/FACILITY_eye_wash_stations.png]`
+
+---
+
+### Fire Extinguishers
+
+Use this file:
+
+`FACILITY_fire_extinguishers.png`
+
+This map shows fire extinguisher locations throughout the facility.
+
+JARVIS should show this map when someone asks:
+
+* where is the fire extinguisher?
+* where are the fire extinguishers?
+* extinguisher map
+* fire safety map
+* fire extinguisher location
+
+Expected JARVIS answer:
+
+Here is the fire extinguisher map:
+
+`[image:/kb/04_HVAC_AND_BUILDING/FACILITY_fire_extinguishers.png]`
+
+---
+
+### Parts Room Map
+
+Use this file:
+
+`MAP_parts_room_location.png`
+
+This map shows where the Envelope Parts Room / Parts Room is located in relation to the building.
+
+JARVIS should show this map when someone asks:
+
+* where is the parts room?
+* show me a map
+* show me the parts room map
+* where is location 8-B?
+* where is bin 8-B?
+* where are AA batteries?
+* where are AAA batteries?
+* where are supplies?
+* how do I get to the parts room?
+* where is the envelope parts room?
+* where is the maintenance parts room?
+* where is the parts inventory?
+
+Expected JARVIS answer after a parts/supplies lookup:
+
+AA batteries are listed at Location 8-B.
+
+Here is the parts room map:
+
+`[image:/kb/09_MAPS/MAP_parts_room_location.png]`
+
+Please physically verify before relying on it.
+
+---
+
+## Facility Areas Covered by Maps
 
 JARVIS may use the map files for questions about:
 
-
-
 * Thermostat locations
-
 * Eye wash station locations
-
 * Fire extinguisher locations
-
+* Parts room location
 * Facility areas
-
 * Warehouse locations
-
 * Ink room
-
 * Pre-Press
-
 * Maintenance
-
 * Warehouse 1 / WH1
-
 * Warehouse 2 / WH2 / Envelopes
-
 * Warehouse 3 / WH3
-
 * Warehouse 4 / WH4 / Mailshop / Building 4
-
 * Envelope Parts Room
-
 * Shipping and Receiving
-
 * Safety Office
-
 * Office areas
 
+---
 
+## Map Answer Rules for JARVIS
 
-## Area Name Matching
+When someone asks for a map, JARVIS should first determine what kind of map they need.
 
+If the previous answer gave a parts/supplies location, and the user then asks “show me a map,” JARVIS should show the parts room map.
 
+If the user asks for a thermostat map, show the thermostat map.
 
-Users may use different names for the same area.
+If the user asks for an eye wash or eyewash station map, show the eye wash station map.
 
+If the user asks for a fire extinguisher map, show the fire extinguisher map.
 
+If JARVIS is not sure which map the user wants, ask a clarifying question:
 
-JARVIS should understand these common equivalents:
+Which map do you need?
 
+* Parts Room
+* Thermostats
+* Eye Wash Stations
+* Fire Extinguishers
 
+JARVIS should not dump the raw map index unless the user specifically asks what maps are available.
 
-* WH1 = Warehouse 1
+---
 
-* WH2 = Warehouse 2 = Envelopes = Envelope Department
+## Image Paths for JARVIS
 
-* WH3 = Warehouse 3
+Use these image paths in JARVIS answers:
 
-* WH4 = Warehouse 4 = Mailshop = Building 4 = Old Mailshop
+Parts Room:
 
-* Ink Department = Ink Room = Ink Shop
+`[image:/kb/09_MAPS/MAP_parts_room_location.png]`
 
-* Pre-Press = Prepress
+Thermostats:
 
-* Safety Office = Safety
+`[image:/kb/04_HVAC_AND_BUILDING/HVAC_thermostat_locations.png]`
 
+Eye Wash Stations:
 
+`[image:/kb/04_HVAC_AND_BUILDING/FACILITY_eye_wash_stations.png]`
 
-## Thermostat Location Questions
+Fire Extinguishers:
 
-
-
-If someone asks where a thermostat is, JARVIS should use page 1 of the main map PDF.
-
-
-
-Example questions:
-
-
-
-* Where is the thermostat for the envelope department?
-
-* Where is the WH2 thermostat?
-
-* Where is the thermostat near Pre-Press?
-
-* Where is the thermostat for Warehouse 4?
-
-* Where is the thermostat near the ink room?
-
-
-
-JARVIS should answer with the map/page reference and a simple location description if clear.
-
-
-
-If the exact thermostat cannot be identified confidently from the map, JARVIS should say:
-
-
-
-"I can see the thermostat map, but I cannot confidently identify the exact thermostat for that area. Please physically verify or ask Jonathan/supervision."
-
-
-
-## Eye Wash Station Questions
-
-
-
-If someone asks where an eye wash station is, JARVIS should use page 2 of the main map PDF.
-
-
-
-Example questions:
-
-
-
-* Where is the nearest eye wash?
-
-* Where is the eye wash station near the ink room?
-
-* Where is the eye wash station near maintenance?
-
-* How many eye wash stations are shown?
-
-
-
-If the question involves an active chemical exposure or injury, JARVIS should not just answer with map information. It should tell the user to follow emergency/safety procedures immediately and notify supervision.
-
-
-
-## Fire Extinguisher Questions
-
-
-
-If someone asks where a fire extinguisher is, JARVIS should use page 3 of the main map PDF.
-
-
-
-Example questions:
-
-
-
-* Where is the nearest fire extinguisher?
-
-* Where are the fire extinguishers in WH2?
-
-* Where is the fire extinguisher near the ink room?
-
-* Where are the fire extinguishers in Warehouse 4?
-
-
-
-If the question involves an active fire, smoke, burning smell, or emergency, JARVIS should not just answer with map information. It should tell the user to follow emergency procedures, alert people nearby, and notify supervision/emergency services as appropriate.
-
-
-
-## JARVIS Answer Style
-
-
-
-When answering map questions, JARVIS should be direct.
-
-
-
-Example:
-
-
-
-"The thermostat locations are shown on page 1 of the facility map. For the envelope department / WH2, check the thermostat map near the envelope machine area."
-
-
-
-Example:
-
-
-
-"Eye wash station locations are shown on page 2 of the facility map. Please verify the nearest station visually before relying on it in an emergency."
-
-
-
-Example:
-
-
-
-"Fire extinguisher locations are shown on page 3 of the facility map. If this is an active fire or smoke situation, follow emergency procedures immediately."
-
-
-
-## Map Limitations
-
-
-
-Maps may become outdated if equipment, stations, extinguishers, departments, or layouts move.
-
-
-
-If a question affects safety or production, JARVIS should recommend physical verification.
-
-
-
-JARVIS should not guess if the map does not clearly answer the question.
-
-
-
-## Emergency Rule
-
-
-
-For safety emergencies, JARVIS should prioritize emergency action over map explanation.
-
-
-
-Examples of emergency-related wording:
-
-
-
-* "If this is an active emergency, follow site emergency procedures immediately."
-
-* "Notify supervision immediately."
-
-* "Do not delay emergency response to ask JARVIS."
-
-
-
-## Do Not Guess Rule
-
-
-
-JARVIS must not invent locations.
-
-
-
-If a location is not clearly shown, JARVIS should say:
-
-
-
-"I could not confirm that location from the current map files."
-
-
-
-Then suggest:
-
-
-
-"Please physically verify or check with supervision/Jonathan."
-
-
-
+`[image:/kb/04_HVAC_AND_BUILDING/FACILITY_fire_extinguishers.png]`
