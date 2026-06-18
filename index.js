@@ -14,9 +14,10 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: "2mb" }));
 
-const APP_VERSION = "0.2.11c";
+const APP_VERSION = "0.2.12";
 const DATA_ROOT = path.join(__dirname, "data", "JARVIS_DATA_FINAL_2026-06-XX");
 const pendingRequests = new Map();
+const lastContexts = new Map();
 
 let knowledgeRecords = [];
 let knowledgeLoadedAt = null;
@@ -25,6 +26,7 @@ let knowledgeLoadError = null;
 const HVAC_THERMOSTAT_IMAGE = "/kb/04_HVAC_AND_BUILDING/HVAC_thermostat_locations.png";
 const EYEWASH_IMAGE = "/kb/04_HVAC_AND_BUILDING/FACILITY_eye_wash_stations.png";
 const FIRE_EXTINGUISHER_IMAGE = "/kb/04_HVAC_AND_BUILDING/FACILITY_fire_extinguishers.png";
+const PARTS_ROOM_IMAGE = "/kb/09_MAPS/MAP_parts_room_location.png";
 
 const JONATHAN_AWAY_START = "Friday evening, June 26, 2026";
 const JONATHAN_TRAVEL_NOTE = "Jonathan is flying to Portland, Oregon on the evening of June 26.";
@@ -1120,10 +1122,81 @@ function answerCopperWastewater(query) {
   ].join("\n");
 }
 
-function answerMapQuestion(query) {
-  const q = normalizeLoose(query);
 
-  if (/\b(thermostat|thermostats)\b/.test(q)) {
+function setLastContext(userKey, context) {
+  if (!userKey) return;
+  lastContexts.set(userKey, {
+    ...context,
+    timestamp: Date.now()
+  });
+}
+
+function getLastContext(userKey) {
+  if (!userKey) return null;
+  const context = lastContexts.get(userKey);
+  if (!context) return null;
+  // Keep short conversational context for 20 minutes.
+  if (Date.now() - context.timestamp > 20 * 60 * 1000) {
+    lastContexts.delete(userKey);
+    return null;
+  }
+  return context;
+}
+
+function isGeneralMapRequest(query) {
+  const q = normalizeLoose(query);
+  return /\b(show me a map|can you show me a map|map please|show map|facility map|where is that|where is it|how do i get there)\b/.test(q) || q === "map";
+}
+
+function isPartsRoomMapQuestion(query) {
+  const q = normalizeLoose(query);
+  return (
+    /\b(parts room|part room|parts map|parts room map|envelope parts room|maintenance parts room|parts inventory|part inventory)\b/.test(q) ||
+    /\b(bin location|location\s*8\s*b|8\s*b|bin\s*8\s*b)\b/.test(q) ||
+    (/\b(where|map|show|find|get)\b/.test(q) && /\b(parts|part|supplies|supply|inventory|bin|bins|location)\b/.test(q))
+  );
+}
+
+function isMapIntent(query) {
+  const q = normalizeLoose(query);
+  return isGeneralMapRequest(query) || isPartsRoomMapQuestion(query) || /\b(thermostat|thermostats|eyewash|eye wash|eye station|eye stations|fire extinguisher|extinguisher|extinguishers)\b/.test(q);
+}
+
+function answerPartsRoomMap() {
+  return [
+    "Here is the parts room map:",
+    "",
+    `[image:${PARTS_ROOM_IMAGE}]`,
+    "",
+    "Parts/supplies locations like 8-B refer to locations inside or around the parts room.",
+    "",
+    "Please physically verify before relying on it."
+  ].join("\n");
+}
+
+function answerMapClarification() {
+  return withButtons(
+    "Which map do you need?",
+    [
+      makeButton("Parts Room", "show parts room map"),
+      makeButton("Thermostats", "show thermostat map"),
+      makeButton("Eye Wash Stations", "show eyewash map"),
+      makeButton("Fire Extinguishers", "show fire extinguisher map")
+    ]
+  );
+}
+
+function answerMapQuestion(query, userKey = "") {
+  const q = normalizeLoose(query);
+  const lastContext = getLastContext(userKey);
+
+  if (isPartsRoomMapQuestion(query) || /\bshow parts room map\b/.test(q)) {
+    setLastContext(userKey, { type: "map", map: "parts-room" });
+    return answerPartsRoomMap();
+  }
+
+  if (/\b(thermostat|thermostats|thermostat map|show thermostat map)\b/.test(q)) {
+    setLastContext(userKey, { type: "map", map: "thermostats" });
     return [
       "Here is the thermostat location map:",
       "",
@@ -1133,9 +1206,10 @@ function answerMapQuestion(query) {
     ].join("\n");
   }
 
-  if (/\b(eyewash|eye wash|eye station|eye stations)\b/.test(q)) {
+  if (/\b(eyewash|eye wash|eye station|eye stations|show eyewash map|show eye wash map)\b/.test(q)) {
+    setLastContext(userKey, { type: "map", map: "eyewash" });
     return [
-      "Here is the eyewash station map:",
+      "Here is the eye wash station map:",
       "",
       `[image:${EYEWASH_IMAGE}]`,
       "",
@@ -1143,7 +1217,8 @@ function answerMapQuestion(query) {
     ].join("\n");
   }
 
-  if (/\b(fire extinguisher|extinguisher|extinguishers)\b/.test(q)) {
+  if (/\b(fire extinguisher|extinguisher|extinguishers|show fire extinguisher map)\b/.test(q)) {
+    setLastContext(userKey, { type: "map", map: "fire-extinguishers" });
     return [
       "Here is the fire extinguisher map:",
       "",
@@ -1151,6 +1226,13 @@ function answerMapQuestion(query) {
       "",
       "If this does not answer the question, JARVIS can flag it for Jonathan."
     ].join("\n");
+  }
+
+  if (isGeneralMapRequest(query)) {
+    if (lastContext?.type === "parts" || lastContext?.map === "parts-room") {
+      return answerPartsRoomMap();
+    }
+    return answerMapClarification();
   }
 
   return "";
@@ -1279,6 +1361,7 @@ function commonSupplyPrompt(query, userKey) {
 
   if (matches.length) {
     const best = matches[0].record;
+    setLastContext(userKey, { type: "parts", item: supplyName });
     return [
       `${supplyName} may be listed in inventory:`,
       "",
@@ -1307,6 +1390,49 @@ function commonSupplyPrompt(query, userKey) {
   );
 }
 
+
+function isVaguePartCategoryRequest(query) {
+  const q = normalizeLoose(query);
+  if (looksLikePartNumber(query)) return false;
+  if (containsCommonSupplyWord(query)) return false;
+
+  const vagueCategories = [
+    "belt", "belts", "bearing", "bearings", "sensor", "sensors", "switch", "switches",
+    "relay", "relays", "motor", "motors", "gear", "gears", "chain", "chains",
+    "sprocket", "sprockets", "valve", "valves", "cylinder", "cylinders", "hose", "hoses",
+    "filter", "filters"
+  ];
+
+  return vagueCategories.some((category) => {
+    const singular = category.replace(/s$/, "");
+    return q === category ||
+      q === `i need a ${singular}` ||
+      q === `i need ${category}` ||
+      q === `need a ${singular}` ||
+      q === `need ${category}` ||
+      q === `looking for a ${singular}` ||
+      q === `looking for ${category}`;
+  });
+}
+
+function vaguePartClarification(query) {
+  const q = normalizeLoose(query);
+  const categoryMatch = q.match(/\b(belts?|bearings?|sensors?|switches?|relays?|motors?|gears?|chains?|sprockets?|valves?|cylinders?|hoses?|filters?)\b/);
+  const item = categoryMatch ? categoryMatch[1] : "part";
+  return [
+    `What ${item} do you need?`,
+    "",
+    "Please give me one of these if you know it:",
+    "- part number",
+    "- machine",
+    "- area",
+    "- description",
+    "- old part markings",
+    "",
+    "Example: “belt for 627 feeder” or “part K1.234”"
+  ].join("\n");
+}
+
 function answerPartsOrSupplyQuestion(query, userKey) {
   const q = normalizeLoose(query);
 
@@ -1319,9 +1445,14 @@ function answerPartsOrSupplyQuestion(query, userKey) {
     return commonSupplyPrompt(query, userKey);
   }
 
+  if (isVaguePartCategoryRequest(query)) {
+    return vaguePartClarification(query);
+  }
+
   if (looksLikePartNumber(query)) {
     const exact = findExactPartMatches(query);
     if (exact.length) {
+      setLastContext(userKey, { type: "parts", item: getRecordPartNumber(exact[0]) || query });
       return [
         "I found an exact or normalized part match:",
         "",
@@ -1333,6 +1464,7 @@ function answerPartsOrSupplyQuestion(query, userKey) {
 
     const normalized = findNormalizedPartMatches(query);
     if (normalized.length) {
+      setLastContext(userKey, { type: "parts", item: getRecordPartNumber(normalized[0]) || query });
       return [
         "I found a normalized part match:",
         "",
@@ -1345,6 +1477,7 @@ function answerPartsOrSupplyQuestion(query, userKey) {
     const fuzzy = findFuzzyPartMatches(query);
     if (fuzzy.length) {
       const item = fuzzy[0];
+      setLastContext(userKey, { type: "parts", item: getRecordPartNumber(item.record) || query });
       pendingRequests.set(userKey, {
         step: "confirm_fuzzy_part",
         originalQuery: query,
@@ -1382,6 +1515,7 @@ function answerPartsOrSupplyQuestion(query, userKey) {
   const strong = results.filter((result) => result.score >= 8);
 
   if (strong.length) {
+    setLastContext(userKey, { type: "parts", item: query });
     return [
       "Here is the closest parts/supplies information I found:",
       "",
@@ -1627,6 +1761,49 @@ function answerInkQuestion(query, userKey, forcedInkNumber = "", forcedBatchPoun
   );
 }
 
+
+function isPendingFlowReply(message) {
+  const command = normalizeLoose(parseButtonMessage(message));
+  if (!command) return false;
+  if (command === "cancel") return true;
+  if (isAffirmative(command) || isNegative(command)) return true;
+  if (wantsToAddToPO(command)) return true;
+  if (command.includes("flag for jonathan")) return true;
+  if (command.includes("yes fuzzy part") || command.includes("no fuzzy part")) return true;
+  if (command.includes("add original item")) return true;
+  if (/^\d+(?:\.\d+)?\s*(lb|lbs|pound|pounds)$/.test(command)) return true;
+  if (/^use ink\s+/.test(command)) return true;
+  if (/^show (parts room|thermostat|eyewash|eye wash|fire extinguisher) map$/.test(command)) return false;
+  return false;
+}
+
+function isFreshQuestionIntent(message) {
+  const q = normalizeLoose(message);
+  if (!q) return false;
+
+  if (isMapIntent(message)) return true;
+  if (shouldGiveJonathanPhone(message) || isJonathanEscalationIntent(message)) return true;
+  if (answerJonathanStatus(message)) return true;
+  if (isActiveEmergency(message)) return true;
+  if (isVagueInkRequest(message) || extractInkNumber(message)) return true;
+  if (containsCommonSupplyWord(message)) return true;
+  if (looksLikePartNumber(message)) return true;
+  if (/\b(waste ink|potomac|pickup|pick up|crystal clean|heritage|parts washer|inx|vendor|contact|phone)\b/.test(q)) return true;
+  if (/\b(hvac|thermostat|ac|air conditioning|cooling|hot|heat|james river|rtu)\b/.test(q)) return true;
+  if (/\b(anilox|roller|volume|lpi|lines per inch|resurface|resurfacing)\b/.test(q)) return true;
+  if (/\b(2 2 3|223|schedule|shift|sunday|saturday|calendar)\b/.test(q)) return true;
+  if (/\b(i need|need|where is|where are|who do i call|show me|can you show|do we have|make|mix|formula)\b/.test(q)) return true;
+
+  return false;
+}
+
+function shouldBreakPendingForNewQuestion(userKey, message) {
+  const pending = pendingRequests.get(userKey);
+  if (!pending) return false;
+  if (isPendingFlowReply(message)) return false;
+  return isFreshQuestionIntent(message);
+}
+
 async function handlePendingRequest(userKey, message) {
   const pending = pendingRequests.get(userKey);
   if (!pending) return "";
@@ -1864,6 +2041,10 @@ async function processUserMessage(message, userKey = "web-user") {
 
   const parsedMessage = parseButtonMessage(originalMessage);
 
+  if (shouldBreakPendingForNewQuestion(userKey, parsedMessage)) {
+    pendingRequests.delete(userKey);
+  }
+
   const pendingResponse = await handlePendingRequest(userKey, parsedMessage);
   if (pendingResponse) return pendingResponse;
 
@@ -1881,13 +2062,13 @@ async function processUserMessage(message, userKey = "web-user") {
     return escalationConfirmationText(originalMessage, result);
   }
 
-  // v0.2.11b hotfix: common supply requests get handled before fuzzy part search or broad knowledge search.
+  const mapAnswer = answerMapQuestion(parsedMessage, userKey);
+  if (mapAnswer) return mapAnswer;
+
+  // Common supply requests get handled before fuzzy part search or broad knowledge search.
   if (containsCommonSupplyWord(parsedMessage)) {
     return commonSupplyPrompt(parsedMessage, userKey);
   }
-
-  const mapAnswer = answerMapQuestion(parsedMessage);
-  if (mapAnswer) return mapAnswer;
 
   const wasteInkAnswer = answerWasteInkPickup(parsedMessage);
   if (wasteInkAnswer) return wasteInkAnswer;
@@ -2185,7 +2366,7 @@ function renderAskPage() {
       <h1>J.A.R.V.I.S.</h1>
       <div class="subtitle">Jonathan's Automated Resource &amp; Virtual Information System</div>
       <div class="version">v${APP_VERSION}</div>
-      <div class="examples">Try: “Do we have ink 186?”, “Make 10 lb of ink 2935 U”, “I need AA batteries”, “Where are the thermostats?”, “Who do I call for waste ink pickup?”</div>
+      <div class="examples">Try: “Do we have ink 186?”, “Make 10 lb of ink 2935 U”, “I need AA batteries”, “Where are the thermostats?”, “Show me a map of the parts room”, “Who do I call for waste ink pickup?”</div>
     </header>
 
     <section id="chat" class="chat" aria-live="polite">
